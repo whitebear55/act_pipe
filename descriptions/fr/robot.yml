@@ -1,0 +1,141 @@
+# Panda Robot Configuration
+# 7-DOF Franka Panda arm + gripper
+# panda.xml 기반 - general actuator (gainprm/biasprm 방식)
+# custom_pd=False → MuJoCo 내장 general actuator가 직접 제어
+# 따라서 kp/kd는 형식용이며 실제 제어는 xml의 gainprm/biasprm이 담당
+
+# ── actuator 타입 정보 (panda.xml <general> 기준) ──────────────────────────
+# actuator1~4: gainprm=4500, biasprm="0 -4500 -450"  → kp=4500, kv=450, forcerange=±87N·m
+# actuator5~7: gainprm=2000, biasprm="0 -2000 -200"  → kp=2000, kv=200, forcerange=±12N·m
+# actuator8  : tendon(split), 그리퍼 → 별도 forcerange=±100, ctrlrange=0~255
+#
+# ── fr3.xml과의 물리 파라미터 차이 ────────────────────────────────────────
+# panda default class:
+#   armature=0.1, damping=1.0, frictionloss=미정의(0)
+# fr3 default class:
+#   armature=0.195, damping=0.21, frictionloss=1.137 (joint별 override 있음)
+#
+# → panda는 frictionloss가 없으므로 FR3보다 tau_ext 오차가 작을 것으로 예상
+
+actuators:
+    kp_ratio: 1.0
+    kd_ratio: 1.0
+    passive_active_ratio: 1.0
+    gain_backdrive: 1.0
+
+    # joint1~4용 대형 모터 파라미터
+    PANDA_HIGH:
+        damping: 1.0          # panda.xml default class damping
+        armature: 0.1         # panda.xml default class armature
+        frictionloss: 0.0     # panda.xml에 frictionloss 미정의 → 0
+        tau_max: 87.0         # default forcerange="-87 87"
+        q_dot_max: 2.62       # Franka Panda 공식 스펙 (rad/s)
+        tau_q_dot_max: 10.0
+        q_dot_tau_max: 1.0
+        tau_brake_max: 100.0
+        kd_min: 1.0
+        kt: 1.0
+
+    # joint5~7용 소형 모터 파라미터
+    PANDA_LOW:
+        damping: 1.0
+        armature: 0.1
+        frictionloss: 0.0
+        tau_max: 12.0         # forcerange="-12 12"
+        q_dot_max: 5.26       # Franka Panda 공식 스펙 (rad/s)
+        tau_q_dot_max: 2.0
+        q_dot_tau_max: 1.0
+        tau_brake_max: 15.0
+        kd_min: 0.5
+        kt: 1.0
+
+    # 그리퍼용 (tendon split)
+    PANDA_GRIPPER:
+        damping: 1.0
+        armature: 0.1
+        frictionloss: 0.0
+        tau_max: 100.0        # forcerange="-100 100"
+        q_dot_max: 0.2
+        tau_q_dot_max: 5.0
+        q_dot_tau_max: 1.0
+        tau_brake_max: 110.0
+        kd_min: 0.1
+        kt: 1.0
+
+motors:
+    # panda.xml <actuator> 이름과 정확히 일치해야 함
+    # actuator1~4: gainprm=4500, biasprm="0 -4500 -450"
+    actuator1:
+        motor: PANDA_HIGH
+        group: arm
+        zero_pos: 0
+        home_pos: 0.0          # keyframe home: joint1=0
+        kp: 4500.0             # gainprm
+        kd: 450.0              # biasprm[2]의 절댓값
+        ki: 0.0
+
+    actuator2:
+        motor: PANDA_HIGH
+        group: arm
+        zero_pos: 0
+        home_pos: 0.0          # joint2=0
+        kp: 4500.0
+        kd: 450.0
+        ki: 0.0
+
+    actuator3:
+        motor: PANDA_HIGH
+        group: arm
+        zero_pos: 0
+        home_pos: 0.0          # joint3=0
+        kp: 3500.0             # gainprm=3500
+        kd: 350.0
+        ki: 0.0
+
+    actuator4:
+        motor: PANDA_HIGH
+        group: arm
+        zero_pos: 0
+        home_pos: -1.5708      # keyframe home: joint4=-1.57079
+        kp: 3500.0
+        kd: 350.0
+        ki: 0.0
+
+    # actuator5~7: gainprm=2000, biasprm="0 -2000 -200"
+    actuator5:
+        motor: PANDA_LOW
+        group: arm
+        zero_pos: 0
+        home_pos: 0.0          # joint5=0
+        kp: 2000.0
+        kd: 200.0
+        ki: 0.0
+
+    actuator6:
+        motor: PANDA_LOW
+        group: arm
+        zero_pos: 0
+        home_pos: 1.5708       # joint6=1.57079
+        kp: 2000.0
+        kd: 200.0
+        ki: 0.0
+
+    actuator7:
+        motor: PANDA_LOW
+        group: arm
+        zero_pos: 0
+        home_pos: -0.7854      # joint7=-0.7853
+        kp: 2000.0
+        kd: 200.0
+        ki: 0.0
+
+    # actuator8: 그리퍼 tendon split
+    # gainprm=0.01568627451, forcerange=±100, ctrlrange=0~255
+    actuator8:
+        motor: PANDA_GRIPPER
+        group: gripper
+        zero_pos: 0
+        home_pos: 255          # keyframe home: ctrl=255 (완전 열림)
+        kp: 0.01569            # gainprm (단위 변환용 스케일)
+        kd: 10.0               # biasprm[2]의 절댓값
+        ki: 0.0

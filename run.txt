@@ -1,0 +1,8 @@
+  mcc-run-policy --policy compliance --robot leap --sim mujoco --vis view
+  mcc-run-policy --policy compliance_model_based --robot toddlerbot --sim mujoc>
+  mcc-run-policy --policy compliance_dp --robot toddlerbot --sim real --ckpt /p>
+  mcc-run-policy --policy compliance_vlm --robot toddlerbot --sim real --object>
+  mcc-run-policy --policy compliance --robot toddlerbot --sim real --vis none
+  mcc-run-policy --policy compliance --robot arx --sim real --vis none
+  mcc-run-policy --policy compliance --robot g1 --sim real --vis none --ip en0
+
