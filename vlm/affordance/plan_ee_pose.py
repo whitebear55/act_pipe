@@ -11,6 +11,12 @@ from scipy.spatial.transform import Slerp
 
 from minimalist_compliance_control.utils import ensure_matrix, get_damping_matrix
 
+
+FR3_CAMERA_EXTRINSICS = {
+    "left":  np.eye(4, dtype=np.float32),  # cam_xpos가 이미 월드 좌표
+    "right": np.eye(4, dtype=np.float32),
+}
+
 TODDY_LEFT_CAMERA_POSITION: npt.NDArray[np.float32] = np.array(
     [0.01, -0.004 + 0.033 / 2.0, 0.048], dtype=np.float32
 )
@@ -88,6 +94,14 @@ TODDY_TOOL_OFFSETS = {
     },
 }
 
+# TOOL_OFFSETS_BY_VARIANT에 fr 추가 (offset 없음)
+FR3_TOOL_OFFSETS = {
+    "gripper": {
+        "rot_offset":         np.eye(3, dtype=np.float32),
+        "contact_offset_vec": np.zeros(3, dtype=np.float32),
+    },
+}
+
 LEAP_TOOL_OFFSETS = {
     "pen": {
         "rot_offset": R.from_euler("xyz", [np.pi / 2, 0, 0])
@@ -111,6 +125,7 @@ LEAP_TOOL_OFFSETS = {
 TOOL_OFFSETS_BY_VARIANT = {
     "toddlerbot": TODDY_TOOL_OFFSETS,
     "leap": LEAP_TOOL_OFFSETS,
+    "fr": FR3_TOOL_OFFSETS   # 추가
 }
 
 
@@ -843,8 +858,11 @@ def plan_end_effector_poses(
         elif tool == "pen":
             task = "draw"
 
+    # 기존 846줄 수정
     camera_extrinsics = (
-        LEAP_CAMERA_EXTRINSICS if "leap" in robot_name else TODDY_CAMERA_EXTRINSICS
+    LEAP_CAMERA_EXTRINSICS  if "leap" in robot_name else
+    FR3_CAMERA_EXTRINSICS   if robot_name in ("fr", "fr3") else
+    TODDY_CAMERA_EXTRINSICS
     )
 
     # 현재 로봇 머리의 위치와 방향을 바탕으로 카메라가 어디를 보고있는지 계산 

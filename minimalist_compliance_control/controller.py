@@ -514,7 +514,7 @@ class ComplianceController:
         
         # TODO 현재 시뮬레이션 시간 확인 및 출력 여부 결정
         current_time = time
-        should_print = (current_time - self._last_print_time) >= 1.0
+        should_print = (current_time - self._last_print_time) >= 2.0
         
         wrenches: Dict[str, npt.NDArray[np.float32]] = {}
         motor_torques_arr = self._smooth_motor_torques(motor_torques)

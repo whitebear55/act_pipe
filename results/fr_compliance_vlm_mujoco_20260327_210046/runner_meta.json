@@ -1,0 +1,6 @@
+{
+  "robot": "fr",
+  "policy": "compliance_vlm",
+  "sim": "mujoco",
+  "num_steps": 536
+}

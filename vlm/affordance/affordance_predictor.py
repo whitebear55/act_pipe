@@ -27,6 +27,7 @@ from .compliance_predictor import CompliancePredictor
 from .plan_ee_pose import (
     LEAP_CAMERA_EXTRINSICS,
     TODDY_CAMERA_EXTRINSICS,
+    FR3_CAMERA_EXTRINSICS
 )
 
 # from toddlerbot.utils.misc_utils import profile
@@ -68,11 +69,12 @@ LEAP_WORKSPACE_SIZE_BY_SITE: Dict[str, np.ndarray] = {
 CAMERA_EXTRINSICS_BY_VARIANT = {
     "leap": LEAP_CAMERA_EXTRINSICS,
     "toddlerbot": TODDY_CAMERA_EXTRINSICS,
+    "fr" : FR3_CAMERA_EXTRINSICS
 }
 
 WORKSPACE_SIZE_BY_VARIANT = {
     "leap": LEAP_WORKSPACE_SIZE_BY_SITE,
-    "toddlerbot": TODDY_WORK_SPACE_SIZE,
+    "toddlerbot": TODDY_WORK_SPACE_SIZE
 }
 
 # TODO: remove the hard code
@@ -88,7 +90,7 @@ TODDY_EE_LOCATIONS: Dict[str, np.ndarray] = {
 }
 EE_LOCATIONS_BY_VARIANT = {
     "leap": LEAP_EE_LOCATIONS,
-    "toddlerbot": TODDY_EE_LOCATIONS,
+    "toddlerbot": TODDY_EE_LOCATIONS
 }
 
 
@@ -1181,6 +1183,8 @@ class AffordancePredictor:
             },
         }
 
+        # send_zmq_request함수를 통해 ZMQ서버로부터 데이터를 받아옴(데이터 수신)
+        # 이 과정에서 서버가 보낸 JSON형태의 데이터를 python의 딕셔너리 객체로 받음
         response = self.send_zmq_request(
             payload,
             request_port=request_port,
@@ -1261,6 +1265,7 @@ class AffordancePredictor:
         if debug:
             os.makedirs(output_dir, exist_ok=True)
 
+        # DEBUG모드일때 RGB이미지를 output_dir에 파일을 저장
         def write_image(name: str, image: np.ndarray) -> None:
             if not debug:
                 return
@@ -1273,22 +1278,25 @@ class AffordancePredictor:
         write_image("left_raw.png", left_image_uint8)
         write_image("right_raw.png", right_image_uint8)
 
+        # 렌즈 왜곡을 펴고 난 후의 깨끗한 이미지
         rectified_left, rectified_right = self.rectifier.rectify(
             left_image_uint8, right_image_uint8
         )
         write_image("left_rectified.png", rectified_left)
         write_image("right_rectified.png", rectified_right)
 
+        # 입력 데이터 정제 -> AI에게 어떤 물체가 목적인지를 알려주기 위해
         object_label_str = (
             str(object_label).strip()
             if object_label is not None and str(object_label).strip()
             else "object"
         )
-
+        
+        # SAM3를 위한 Target 설정
         if is_wiping:
-            segmentation_target = object_label_str + ".whiteboard.vase"
+            segmentation_target = object_label_str + ".whiteboard.vase" # 검은 잉크 + 화이트보드/꽃병(물체와 배경지식을 같이 제공)
         else:
-            segmentation_target = "whiteboard.vase"
+            segmentation_target = "whiteboard.vase" # 그릴 때는 칠판이나 꽃병 영역을 찾아줘(타겟이 없으므로)
 
         segments = [segment.strip() for segment in object_label_str.split(".")]
         target_priority = [segment for segment in segments if segment]
@@ -1296,6 +1304,9 @@ class AffordancePredictor:
         sam_result = self.request_sam3(
             rectified_left, segmentation_target, timeout_s=self.sam3_timeout
         )
+
+        # postprocess_sam_result()를 통해서 sam3이 찾은 마스크 중 우선순위가 가장 높은 이미지를 선택
+        # 만약 1순위 마스크를 찾지 못했다면 2순위 마스크를 가져옴
         try:
             annotation, segmentation_mask, left_union_mask = postprocess_sam_result(
                 sam_result, target_priority, rectified_left.shape[:2]
@@ -1310,16 +1321,19 @@ class AffordancePredictor:
                 self.last_wiping_done = True
             return None
 
+        # SAM3모델로부터 받아온 segmentation마스크의 크기를 원본 이미지(왼쪽 카메라 이미지)의 크기와 완벽하게 일치시키는 과정
         if segmentation_mask.shape != rectified_left.shape[:2]:
             segmentation_mask = cv2.resize(
                 segmentation_mask,
                 (rectified_left.shape[1], rectified_left.shape[0]),
-                interpolation=cv2.INTER_NEAREST,
+                interpolation=cv2.INTER_NEAREST, # 보간을 통해서 해상도 matching!!
             )
-
+        
+        # 이미지에서 세그멘테이션 부분을 겹친 이미지 저장
         annotation_overlay = draw_annotation_overlay(rectified_left, annotation)
         write_image("annotation_overlay.png", annotation_overlay)
 
+        # 이미지 중심 기준으로부터 Edge에 있는 pixel들 제거하는 과정(왜곡된 부분 제거)
         segmentation_mask, removed, total, max_dist = trim_mask_by_center(
             segmentation_mask
         )
@@ -1329,11 +1343,12 @@ class AffordancePredictor:
                 f"{removed}/{total} pixels beyond {max_dist:.1f}px from center."
             )
 
+        # MASK Visualization -> 이미지에서 로봇이 작업할 수 있는 물체의 영역을 Tag
         segmentation_mask_visual = (segmentation_mask * 255).astype(np.uint8)
         write_image("segmentation_mask.png", segmentation_mask_visual)
 
         if is_wiping:
-            if "whiteboard" in annotation["label"] or "vase" in annotation["label"]:
+            if "whiteboard" in annotation["label"] or "vase" in annotation["label"]: # 다 닦음
                 print(
                     "[AffordancePredictor] Wiping done: whiteboard/vase detected in annotation."
                 )
@@ -1341,7 +1356,7 @@ class AffordancePredictor:
                 return None
 
             mask_pixel_count = int(np.count_nonzero(segmentation_mask))
-            if mask_pixel_count < MIN_MASK_PIXELS:
+            if mask_pixel_count < MIN_MASK_PIXELS: # 픽셀 개수 기반 작업 종료 판정
                 print(
                     f"[AffordancePredictor] Wiping done: segmentation mask has too few pixels ({mask_pixel_count} < {MIN_MASK_PIXELS})."
                 )
@@ -1351,17 +1366,18 @@ class AffordancePredictor:
             ys, xs = np.nonzero(segmentation_mask)
             mask_bbox = [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
             rect_map = {name: {"bbox": mask_bbox} for name in site_names}
-            candidate_point_groups = prepare_candidate_points(
-                rect_map,
+            candidate_point_groups = prepare_candidate_points( # 아직 닦을 것이 남았다면 닦을 순서를 정해달라고 하는 함수
+                rect_map, 
                 rectified_left.shape[:2],
                 site_names,
                 grid_size=20,
                 bbox_padding=2,
             )
             depth_result = None
-            compliance_image = rectified_left
-        else:
-            depth_result = self.request_foundation_stereo(
+            compliance_image = rectified_left # 후보점들을 기반으로 Gemini는 "1번에서 5번순서대로 닦아!" 명령을 지시
+
+        else: # Drawing
+            depth_result = self.request_foundation_stereo( # Depth 추정 
                 rectified_left,
                 rectified_right,
                 timeout_s=self.fs_timeout,
@@ -1372,10 +1388,14 @@ class AffordancePredictor:
                 depth_map = depth_map * (left_union_mask > 0)
 
             workspace_depth = float(np.median(depth_map[depth_map > 0]))
+
+            # 로봇의 작업 영역 투영 -> 로봇의 팔 길이 고려하여 이정도 영역에는 팔이 닿겠다는 영역을 이미지에 그려줌
             compliance_image, workspace_rects = self.render_workspaces(
                 rectified_left, robot_name, workspace_depth, site_names=site_names
             )
-            write_image("compliance_workspace.png", compliance_image)
+            write_image("compliance_workspace.png", compliance_image) # 로봇의 팔이 닿을 수 있는 영역을 말함
+
+            # Gemini에게 줄때도 이 영역안에서 contact후보점을 결정하라고 명령
             rect_map = {name: {"bbox": rect} for name, rect in workspace_rects}
             candidate_point_groups = prepare_candidate_points(
                 rect_map, rectified_left.shape[:2], site_names, grid_size=20
@@ -1385,6 +1405,8 @@ class AffordancePredictor:
             "Predicting affordance for task "
             f"{self.default_task} on '{object_label_str}'."
         )
+
+        # 작업별 Target label 최적화
         if is_wiping:
             target_object_label = object_label_str
         else:
@@ -1398,6 +1420,7 @@ class AffordancePredictor:
                 [f"{site}: {obj}" for site, obj in zip(site_names, object_list)]
             )
 
+        # 비동기 VLM 호출
         compliance_future = self.executor.submit(
             self.compliance_predictor.predict_compliance,
             compliance_image,
@@ -1427,7 +1450,8 @@ class AffordancePredictor:
             write_image(
                 "right_union_mask.png", (right_union_mask > 0).astype(np.uint8) * 255
             )
-
+        
+        # 관심있는 영역에 대한 depth값 추출(FoundationStereo 클래스를 이용하여)
         if depth_result is None:
             depth_result = self.request_foundation_stereo(
                 rectified_left,
@@ -1439,6 +1463,7 @@ class AffordancePredictor:
             if depth_map is not None and left_union_mask is not None:
                 depth_map = depth_map * (left_union_mask > 0)
 
+        # 관심있는 영역을 원본이미지에 Overlay
         overlay_image = draw_points_overlay(
             rectified_left, grouped=candidate_point_groups
         )
@@ -1446,9 +1471,11 @@ class AffordancePredictor:
 
         xyz_map: Optional[np.ndarray] = None
 
+        # 2D 좌표를 3D좌표로 변환
         if depth_map is not None:
             xyz_map = depth_to_xyzmap(depth_map, self.intrinsic_matrix, zmin=0.0)
 
+        # Depth 정보 시각화 -> 거리에 따른 색상변화로 거리값이 제대로 추출되었는지 확인
         if debug and depth_map is not None:
             depth_vis = vis_disparity(
                 depth_map,
@@ -1459,7 +1486,8 @@ class AffordancePredictor:
             )
             write_image("depth_map_vis.png", depth_vis)
 
-        prompt, compliance_result = compliance_future.result()
+        # VLM의 응답 확인
+        prompt, compliance_result = compliance_future.result() # compliance_result : 선택된 픽셀 좌표
         if not compliance_result:
             print("Prediction failed.")
             return None
@@ -1468,6 +1496,7 @@ class AffordancePredictor:
             with open(os.path.join(output_dir, "prompt.txt"), "w") as f:
                 f.write(prompt)
 
+            # 답변 데이터 직렬화 및 JSON형식으로 저장 
             serializable_result = {}
             for key, value in compliance_result.items():
                 if isinstance(value, np.ndarray):
@@ -1478,11 +1507,18 @@ class AffordancePredictor:
             with open(os.path.join(output_dir, "prediction.json"), "w") as f:
                 json.dump(serializable_result, f, indent=2)
 
+            # 이미지위에 Gemini가 선택한 점들을 Overlay(번호까지 매겨서 어떤 순서로 이동할지 알 수 있게)
             contact_vis = draw_points_overlay(
                 rectified_left, grouped=compliance_result, annotate=True
             )
             write_image("contact_points_overlay.png", contact_vis)
 
+        # compliance_result에는 "각 손으로 어떤 경로를 따라움직여야 하는지"를 나타내는 픽셀 좌표의 모음을 나타냄
+        '''
+        compliance_result = {
+            'left_hand': [[102, 200], [105, 210], [110, 220]], # 3개의 좌표
+            'right_hand': [[400, 150], [410, 160]]            # 2개의 좌표
+        }'''
         contact_coords = np.concatenate(list(compliance_result.values()), axis=0)
         contact_group_indices = {}
         idx = 0
@@ -1490,6 +1526,7 @@ class AffordancePredictor:
             contact_group_indices[group_key] = slice(idx, idx + len(coords))
             idx += len(coords)
 
+        # 각 좌표에 대한 거리정보를 추가하여 3D 좌표로 변환
         if xyz_map is not None:
             height, width = xyz_map.shape[:2]
             contact_points_3d_list: List[List[float]] = []
@@ -1528,6 +1565,7 @@ class AffordancePredictor:
             merged_pcd = None
             contact_indices = []
 
+        # 법선 벡터를 통해 물체를 '어느 방향으로 누를까?'를 계산
         contact_normals = np.empty((0, 3), dtype=np.float32)
         if merged_pcd is not None and np.asarray(merged_pcd.points).shape[0] >= 3:
             merged_pcd.estimate_normals(
