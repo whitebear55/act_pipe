@@ -548,12 +548,12 @@ class ComplianceController:
                 site_rot,
                 self.estimate_config,
             )
-            if should_print:
-                print(f"\n--- [Debug @ {current_time:.1f}s] Site: {site} ---")
-                print(f"현재 모터 각도 {qpos[:9]}")
-                print(f"tau_raw  : {np.round(tau_raw[:3], 4)}")
-                print(f"tau_bias : {np.round(tau_bias[:3], 4)}")
-                print(f"EE_wrench: {np.round(wrench[:3], 4)}")
+            # if should_print:
+            #     print(f"\n--- [Debug @ {current_time:.1f}s] Site: {site} ---")
+            #     print(f"현재 모터 각도 {qpos[:9]}")
+            #     print(f"tau_raw  : {np.round(tau_raw[:3], 4)}")
+            #     print(f"tau_bias : {np.round(tau_bias[:3], 4)}")
+            #     print(f"EE_wrench: {np.round(wrench[:3], 4)}")
 
             wrenches[site] = wrench 
 

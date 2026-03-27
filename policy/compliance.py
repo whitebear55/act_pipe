@@ -421,11 +421,9 @@ class CompliancePolicy:
     def _align_command_to_observation(self, obs: Any) -> None:
 
         if self._alignment_applied:
-            print("_____________")
             return
         if self._has_initial_pose_override:
             self._alignment_applied = True
-            print("((((((((((((((_____________))))))))))))))")
             return
 
         qpos = np.asarray(obs.qpos, dtype=np.float32)
@@ -448,12 +446,6 @@ class CompliancePolicy:
             motor_pos=motor_pos.copy(),
             qpos=qpos.copy(),
         )
-        print(f"\n{'='*20} [Alignment Applied] {'='*20}")
-        print(f"1. Captured x_obs (Actual Pose) : {np.round(x_obs, 4)}")
-        print(f"2. Applied x_ref in last_state : {np.round(self.controller._last_state.x_ref, 4)}")
-        print(f"3. Initial motor_pos (Joints) : {np.round(self.controller._last_state.motor_pos, 4)}")
-        print(f"Result: 명령(Command)이 현재 로봇의 실제 위치로 동기화되었습니다.")
-        print(f"{'='*60}\n")
 
         self._alignment_applied = True
 
@@ -517,14 +509,14 @@ class CompliancePolicy:
             self.perturb_site_forces[:] = 0.0
 
     def step(self, obs: Any, sim: Any) -> npt.NDArray[np.float32]:
-        if not hasattr(self, "_vlm_debug_done"):
-                print(f"self.base_pose_command :{self.base_pose_command} ")
-                print(f"self.pose_command :{self.pose_command} ")
-                print(f"self.default_state :{self.default_state} ")
-                print(f"self.default_motor_pos :{self.default_motor_pos} ")
-                print(f"self.default_qpos :{self.default_qpos} ")
-                print(f"self._has_initial_pose_override :{self._has_initial_pose_override} ")
-                self._vlm_debug_done = True
+        # if not hasattr(self, "_vlm_debug_done"):
+        #         print(f"self.base_pose_command :{self.base_pose_command} ")
+        #         print(f"self.pose_command :{self.pose_command} ")
+        #         print(f"self.default_state :{self.default_state} ")
+        #         print(f"self.default_motor_pos :{self.default_motor_pos} ")
+        #         print(f"self.default_qpos :{self.default_qpos} ")
+        #         print(f"self._has_initial_pose_override :{self._has_initial_pose_override} ")
+        #         self._vlm_debug_done = True
         has_mujoco_state = str(getattr(sim, "name", "")).lower() == "mujoco"
         if has_mujoco_state and bool(self.enable_force_perturbation):
             if self.perturb_site_forces is None:

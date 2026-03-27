@@ -23,8 +23,15 @@ from scipy.spatial.transform import Rotation as R
 from policy.compliance import CompliancePolicy
 from real_world.camera import Camera
 from vlm.affordance.affordance_predictor import AffordancePredictor
+from vlm.affordance.compliance_predictor import CompliancePredictor
 from vlm.affordance.plan_ee_pose import plan_end_effector_poses
+from vlm.depth.depth_utils import depth_to_xyzmap
 
+TASK_OBJECT_MAP = {
+    "wiping":  "black ink",
+    "drawing": "star",
+    "picking": "red box",
+}
 
 class ComplianceVLMPolicy(CompliancePolicy):
     """Guides compliance references via affordance-predicted trajectories."""
@@ -40,7 +47,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
         record_video: bool = False,
         image_height: int = 480,
         image_width: int = 640,
-        predictor_model: str = "gemini-2.5-pro",
+        predictor_model: str = "gemini-2.5-flash",
         predictor_provider: str = "gemini",
     ) -> None:
         if robot == "leap":
@@ -92,13 +99,10 @@ class ComplianceVLMPolicy(CompliancePolicy):
             elif self.robot == "fr":
                 self.target_site_names = ["attachment_site"]
 
-        print(f"self.target_site_names : {self.target_site_names}")
-
         # dimension check
         cfg_ref_motor_pos = np.asarray(
             self.compliance_cfg.ref_motor_pos, dtype=np.float32
         ).reshape(-1)
-        print(f"Motor의 기본 초기화값: {self.compliance_cfg.ref_motor_pos}")
         if cfg_ref_motor_pos.size > 0:
             if cfg_ref_motor_pos.shape[0] != self.default_motor_pos.shape[0]:
                 raise ValueError(
@@ -107,8 +111,6 @@ class ComplianceVLMPolicy(CompliancePolicy):
                     f"got {cfg_ref_motor_pos.shape[0]}."
                 )
             self.ref_motor_pos = cfg_ref_motor_pos.copy()
-
-        print(f"Motor의 기본 초기화값2: {self.ref_motor_pos}")
         
         self.neck_pitch_idx: Optional[int] = None
         if self.robot == "toddlerbot":
@@ -145,6 +147,12 @@ class ComplianceVLMPolicy(CompliancePolicy):
         # "지우개로 화이트보드 닦아줘"라는 명령을 할 때!
         self.status = "waiting"
         self.target_object_label = str(object)
+
+        self.task_object_map = {
+            "wiping":  str(object),   # CLI로 덮어쓸 수 있도록
+            "drawing": "star",
+            "picking": "red box",     # pick은 항상 red box
+        }
         self.tool = "eraser"
         self.trajectory_plans: Dict[str, Tuple[np.ndarray, ...]] = {}
         self.traj_start_time: Optional[float] = None
@@ -170,6 +178,12 @@ class ComplianceVLMPolicy(CompliancePolicy):
             provider=str(predictor_provider),
         )
 
+
+        self.pick_cp = CompliancePredictor(
+            provider=str(predictor_provider),
+            model=str(predictor_model),
+        )
+
         self.left_camera: Optional[Camera] = None
         self.right_camera: Optional[Camera] = None
         try:
@@ -182,8 +196,8 @@ class ComplianceVLMPolicy(CompliancePolicy):
 
         # 키보드를 이용하여 VLM에게 명령을 지시
         self.teleop.set_command_bindings(
-            {"w": "wiping", "d": "drawing"},
-            help_labels={"w": "wipe", "d": "draw"},
+            {"w": "wiping", "d": "drawing", "p": "picking"},
+            help_labels={"w": "wipe", "d": "draw", "p" : "pick"},
             enable_default_controls=False,
         )
         self.teleop.print_help(prefix="[ComplianceVLM]")
@@ -205,6 +219,12 @@ class ComplianceVLMPolicy(CompliancePolicy):
         self.set_stiffness(
             pos_stiffness=[400.0, 400.0, 400.0], rot_stiffness=[40.0, 40.0, 40.0]
         )
+
+        # ── Pick 작업 초기화 ─────────────────────────────────
+        self.pick_future: Optional[Future] = None
+        self.pick_target_3d: Optional[np.ndarray] = None  # 월드 좌표계 파지점
+        self.pick_arrived = False                          # EE 도착 여부
+        self._PICK_ARRIVE_THRESH = 0.02                   # 도착 판정 거리 (m)
     
     def reset(self) -> None:
         self.traj_start_time = None
@@ -242,7 +262,6 @@ class ComplianceVLMPolicy(CompliancePolicy):
             dtype=np.float32,
         )
         self.rest_pose_command = rest_pose # 아무일도 안할 때 돌아올 휴식 위치
-        print(f"로봇의 초기 각도 : {self.rest_pose_command}")
         self.pose_command[:, :] = self.rest_pose_command # 실제 외력에 반응하면서 움직이는 실제 경로
         self.base_pose_command[:, :] = self.rest_pose_command # 이상적인 경로(외력이 없을때)
 
@@ -340,8 +359,11 @@ class ComplianceVLMPolicy(CompliancePolicy):
             return
         self.status = target_status
         self.tool = "eraser" if is_wiping else "pen"
-        if object_label is not None:
-            self.target_object_label = str(object_label)
+        task_key = "wiping" if is_wiping else "drawing"
+        resolved_label = object_label if object_label is not None else self.task_object_map.get(task_key)
+        if resolved_label is not None:
+            self.target_object_label = str(resolved_label)
+        
         if site_names is not None and len(site_names) > 0:
             self.target_site_names = [str(x) for x in site_names]
         elif not self.site_names_fixed:
@@ -460,6 +482,14 @@ class ComplianceVLMPolicy(CompliancePolicy):
             self.set_mode(True)
         elif cmd == "drawing":
             self.set_mode(False)
+        elif cmd == "picking":
+            if self.status != "picking":
+                self.status = "picking"
+                self.pick_target_3d = None
+                self.pick_future = None
+                self.pick_arrived = False
+                self.trajectory_plans = {}
+                print("[Pick] pick 모드 진입")
 
     #이미지 규격 통일(VLM이 이해할 수 있는 규격으로) 
     def _to_hwc_u8(self, image: np.ndarray) -> np.ndarray:
@@ -830,6 +860,175 @@ class ComplianceVLMPolicy(CompliancePolicy):
             self.video_temp_dir = None
         self.video_path = None
 
+    def _pixel_to_world(
+        self, u: int, v: int, sim: Any
+    ) -> Optional[np.ndarray]:
+        """
+        MuJoCo depth buffer + left_camera 내부 파라미터 →
+        월드 좌표계 3D 점 반환.
+        depth_to_xyzmap (기존 depth_utils.py) 재사용.
+        """
+        import mujoco
+
+        model, data = sim.model, sim.data
+        if sim.renderer is None:
+            return None
+
+        # 1. depth buffer 렌더링
+        sim.renderer.enable_depth_rendering()
+        sim.renderer.update_scene(data, camera="left_camera")
+        depth_norm = sim.renderer.render().copy()  # (H, W) [0,1] 정규화값
+        sim.renderer.disable_depth_rendering()
+
+        # 2. 정규화값 → 미터 변환
+        near = float(model.vis.map.znear * model.stat.extent)
+        far  = float(model.vis.map.zfar  * model.stat.extent)
+        z_map = near + depth_norm * (far - near)  # (H, W) 미터
+
+        # 3. 픽셀 (u,v) → 카메라 좌표계 3D (depth_utils 함수 재사용)
+        P1 = np.asarray(self.predictor.intrinsic_matrix, dtype=np.float32)
+        fx, fy = float(P1[0, 0]), float(P1[1, 1])
+        cx, cy = float(P1[0, 2]), float(P1[1, 2])
+        K = np.array(
+            [[fx, 0, cx],
+            [0, fy, cy],
+            [0,  0,  1]],
+            dtype=np.float32,
+        )
+        xyz_map = depth_to_xyzmap(z_map, K, zmin=0.01)  # (H, W, 3) 카메라 좌표계
+        xyz_cam = xyz_map[v, u]                           # (3,)
+
+        if xyz_cam[2] <= 0.01:
+            print(f"[Pick] 유효하지 않은 depth at ({u},{v}): {xyz_cam[2]:.4f}")
+            return None
+
+        # 4. 카메라 좌표계 → 월드 좌표계
+        # MuJoCo 카메라: +X=오른쪽, +Y=위, -Z=전방
+        # depth_to_xyzmap 표준 카메라: +X=오른쪽, +Y=아래, +Z=전방
+        # 따라서 Y와 Z를 반전 후 cam_xmat 적용
+        cam_id  = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_CAMERA, "left_camera"
+        )
+        cam_pos = data.cam_xpos[cam_id].copy()               # (3,)
+        cam_rot = data.cam_xmat[cam_id].reshape(3, 3).copy() # (3,3)
+
+        xyz_muj = np.array(
+            [xyz_cam[0], -xyz_cam[1], -xyz_cam[2]], dtype=np.float32
+        )
+        p_world = (cam_pos + cam_rot @ xyz_muj).astype(np.float32)
+        return p_world
+
+
+    def _maybe_start_pick_prediction(self, obs: Any) -> None:
+        """
+        pick 모드 진입 직후 1회만 Gemini 예측을 비동기로 시작.
+        maybe_start_prediction과 동일한 패턴.
+        """
+        if self.pick_future is not None:
+            return  # 이미 진행 중
+        if self.pick_target_3d is not None:
+            return  # 이미 목표 있음
+
+        left_img = getattr(obs, "left_image", None)
+        if left_img is None or left_img.shape[0] < 10:
+            print("[Pick] 이미지 없음, 예측 불가")
+            return
+
+        site_name = self.target_site_names[0] if self.target_site_names else "attachment_site"
+        object_label = self.task_object_map.get("picking", "red box")
+
+        def _run():
+            return self._run_pick_predict(left_img, object_label, site_name)  # ← 수정
+
+        self.pick_future = self.prediction_executor.submit(_run)
+        print(f"[Pick] Gemini 예측 시작: object='{object_label}', site='{site_name}'")
+    
+    def _create_pick_prompt(self, object_label: str, site_name: str, H: int, W: int) -> str:
+            return f"""
+        TASK: Pick up the {object_label} using a robot arm.
+        TARGET OBJECT: {object_label}
+        IMAGE SIZE: {W}x{H} pixels
+
+        ACTION REQUIREMENTS:
+        - Identify the single best contact point on the {object_label} for grasping.
+        - The point should be at the top surface or center of the object.
+        - Return exactly ONE contact point.
+
+        OUTPUT JSON FORMAT:
+        {{
+        "{site_name}": {{
+            "contact_sequence": [
+            {{"contact_point": [x, y]}}
+            ]
+        }}
+        }}
+
+        JSON RULES:
+        - Return valid JSON with double quotes only.
+        - x: horizontal pixel (0=left, {W}=right).
+        - y: vertical pixel (0=top, {H}=bottom).
+        - No explanations.
+
+        BEGIN OUTPUT:
+        """
+
+    def _run_pick_predict(
+        self, image: np.ndarray, object_label: str, site_name: str
+    ) -> Optional[np.ndarray]:
+        """CompliancePredictor를 직접 사용해서 pick 예측 실행."""
+        H, W = image.shape[:2]
+        prompt = self._create_pick_prompt(object_label, site_name, H, W)
+        b64 = self.pick_cp.encode_image(image)
+        contact_data = self.pick_cp.invoke_model(prompt, b64)
+        if not contact_data:
+            return None
+        entry = contact_data.get(site_name)
+        if not entry:
+            print(f"[Pick] site '{site_name}' 응답 없음")
+            return None
+        return self.pick_cp.parse_contact_data(entry)  # → np.ndarray (N, 2) or None
+
+
+    def _consume_pick_prediction(self, obs: Any, sim: Any) -> None:
+        """
+        예측 결과가 오면 2D→3D 변환 후 pose_command 업데이트.
+        _consume_prediction과 동일한 패턴.
+        """
+        if self.pick_future is None or not self.pick_future.done():
+            return
+
+        try:
+            pixel_coords = self.pick_future.result()  # np.ndarray (N, 2) or None
+        except Exception as e:
+            print(f"[Pick] 예측 실패: {e}")
+            pixel_coords = None
+        finally:
+            self.pick_future = None
+
+        if pixel_coords is None or len(pixel_coords) == 0:
+            print("[Pick] 유효한 픽셀 좌표 없음, 대기 상태로 복귀")
+            self.status = "waiting"
+            return
+
+        u, v = int(pixel_coords[0, 0]), int(pixel_coords[0, 1])
+        print(f"[Pick] Gemini 응답: pixel=({u}, {v})")
+
+        target_3d = self._pixel_to_world(u, v, sim)
+        if target_3d is None:
+            print("[Pick] 3D 변환 실패")
+            self.status = "waiting"
+            return
+
+        print(f"[Pick] 3D 목표 (월드): {np.round(target_3d, 4)}")
+
+        # pose_command 업데이트 (EE 위치만, 자세는 현재 유지)
+        site_idx = 0
+        self.pose_command[site_idx, 0:3] = target_3d
+        self.base_pose_command[site_idx, 0:3] = target_3d
+
+        self.pick_target_3d = target_3d
+        self.pick_arrived = False
+
     def step(
         self,
         obs: Any,
@@ -861,14 +1060,28 @@ class ComplianceVLMPolicy(CompliancePolicy):
         # 한번 닦기를 완료했으면, 다 닦였나?를 확인하기 위해 VLM을 호출하여 다시 물어볼 준비
         if self.status == "waiting":
             self.wipe_pause_end_time = None
-            if not hasattr(self, "_vlm_debug_done"):
-                print(f"self.base_pose_command :{self.base_pose_command} ")
-                print(f"self.pose_command :{self.pose_command} ")
-                print(f"self.default_state :{self.default_state} ")
-                print(f"self.default_motor_pos :{self.default_motor_pos} ")
-                print(f"self.default_qpos :{self.default_qpos} ")
-                print(f"self._has_initial_pose_override :{self._has_initial_pose_override} ")
-                self._vlm_debug_done = True
+            return np.asarray(action, dtype=np.float32)
+        
+        # ── ▼ 여기에 pick 분기 추가 ──────────────────────────
+        if self.status == "picking":
+            # 1. 예측 시작 (처음 1회)
+            self._maybe_start_pick_prediction(obs)
+            # 2. 결과 수신 → pose_command 갱신
+            self._consume_pick_prediction(obs, sim)
+
+            # 3. EE가 목표에 도착했는지 확인
+            if self.pick_target_3d is not None and not self.pick_arrived:
+                x_obs = self.controller.get_x_obs()
+                pos_err = float(
+                    np.linalg.norm(x_obs[0, :3] - self.pick_target_3d)
+                )
+                if pos_err < self._PICK_ARRIVE_THRESH:
+                    print(f"[Pick] 도착! err={pos_err:.4f}m → 그리퍼 닫기")
+                    # 그리퍼 닫기: action[-1]에 그리퍼 제어값 (0.0 = 완전 닫힘)
+                    action[-1] = np.float32(0.0)
+                    self.pick_arrived = True
+                    self.status = "waiting"
+
             return np.asarray(action, dtype=np.float32)
 
         if self.status != "wiping":
@@ -882,7 +1095,6 @@ class ComplianceVLMPolicy(CompliancePolicy):
                 self.request_prediction_after_completion()
             else:
                 self._consume_prediction(float(obs.time))
-                print("33333333")
                 return np.asarray(action, dtype=np.float32)
 
 
@@ -910,15 +1122,13 @@ class ComplianceVLMPolicy(CompliancePolicy):
             self.prepare_fixed_plan() # .lz4파일에서 데이터를 읽어와 경로를 저장
 
         self.maybe_start_prediction(obs, has_fixed_trajectory) # VLM에게 예측을 시킬지 판단
-        print("4444444444444")
         self._consume_prediction(float(obs.time)) # VLM이 답변을 다 했는지 확인 및 답변이 왔다면 새 경로로 경로 계확
         self._apply_trajectory(float(obs.time)) 
-        print("5555555555555555")
+
         left, right = self._get_stereo_images(obs)
         if self.record_video:
             self.start_video_logging()
             self.log_camera_frame(float(obs.time), left, right)
-        print("66666666666666")
         return np.asarray(action, dtype=np.float32)
 
     def close(self, exp_folder_path: str = "") -> None:

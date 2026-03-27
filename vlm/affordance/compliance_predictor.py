@@ -68,12 +68,15 @@ class CompliancePredictor:
             raise ValueError("Failed to encode image for compliance predictor")
 
         return base64.b64encode(encoded.tobytes()).decode("utf-8")
+    
+    # TODO : prompt와 이미지를 AI에게 보내고, 답변으로부터 필요한 data만 뽑아내는 '통신 및 필터링'역할을 수행
+    # API 요청을 수행하고, AI가 서술형으로 답변하더라고 그 안에서 json블록을 찾아내어 파이썬 딕셔너리 형태로 변환
 
     # @profile()
     def invoke_model(self, prompt: str, images_data: str) -> Optional[Dict[str, Any]]:
         t0 = time.perf_counter()
         headers = self.provider.get_headers()
-        payload = self.provider.format_request(
+        payload = self.provider.format_request( # MODEL에 맞게 데이터를 포장
             prompt, images_data, self.model, self.api_settings
         )
 
@@ -139,7 +142,7 @@ class CompliancePredictor:
             print(f"Full API response: {result}")
             return None
 
-        json_match = re.search(r"```(?:json)?\s*\n(.*?)\n```", content, re.DOTALL)
+        json_match = re.search(r"```(?:json)?\s*\n(.*?)\n```", content, re.DOTALL) # 답변 중 JSON블록 extract
         if json_match:
             json_str = json_match.group(1)
         else:
@@ -186,7 +189,7 @@ class CompliancePredictor:
             entry = contact_data.get(site_name)
             if not entry:
                 continue
-            parsed = self.parse_contact_data(entry)
+            parsed = self.parse_contact_data(entry) # JSON내의 contact_sequence 또는 contact_range 키를 찾아 그 안에 담긴 [x,y] 좌표들을 순서대로 추출
             if parsed is None:
                 continue
             results[site_name] = parsed
