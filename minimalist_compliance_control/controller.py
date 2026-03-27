@@ -143,7 +143,6 @@ class ComplianceController:
         x_obs = np.zeros((num_sites, 6), dtype=np.float32)
         for idx, site_name in enumerate(self.config.site_names):
             site_id = int(self.wrench_sim.site_ids[site_name])
-
             # x_obs = [x,y,z,rx,ry,rz]
             x_obs[idx, :3] = np.asarray(
                 self.wrench_sim.data.site_xpos[site_id], dtype=np.float32
@@ -485,34 +484,6 @@ class ComplianceController:
                 alpha * motor_torques_arr + (1.0 - alpha) * self._motor_torque_ema
             ).astype(np.float32)
         return self._motor_torque_ema.copy()
-    
-    def apply_wrench_deadzone(self, wrench, force_threshold=2.0, torque_threshold=0.2):
-        """
-        EE_wrench의 유령 힘(노이즈)을 무시하기 위한 데드존 필터
-        wrench: [fx, fy, fz, tx, ty, tz] 형태의 numpy 배열
-        """
-        filtered_wrench = np.copy(wrench)
-        
-        # 1. 힘(Force) 성분 필터링 [fx, fy, fz]
-        force_vec = wrench[:3]
-        force_mag = np.linalg.norm(force_vec) # 힘의 크기 계산
-        
-        if force_mag < force_threshold:
-            filtered_wrench[:3] = 0.0 # 임계값보다 작으면 유령 힘으로 간주하고 0 처리
-        else:
-            # 임계값을 넘었을 때, 급격한 변화를 막기 위해 임계값만큼 빼주는 'Soft Deadzone' 방식
-            filtered_wrench[:3] = force_vec * (1.0 - force_threshold / force_mag)
-
-        # 2. 토크(Torque) 성분 필터링 [tx, ty, tz]
-        torque_vec = wrench[3:]
-        torque_mag = np.linalg.norm(torque_vec)
-        
-        if torque_mag < torque_threshold:
-            filtered_wrench[3:] = 0.0
-        else:
-            filtered_wrench[3:] = torque_vec * (1.0 - torque_threshold / torque_mag)
-            
-        return filtered_wrench
 
     def step(
         self,
@@ -521,7 +492,11 @@ class ComplianceController:
         qpos: npt.NDArray[np.float32],
         time : float, # TODO [실제 시간 인자 추가]
     ) -> tuple[Dict[str, npt.NDArray[np.float32]], Optional[ComplianceState]]:
+        
         """Run one loop and return estimated wrenches and optional compliance state."""
+        command_matrix[:, COMMAND_LAYOUT.measured_force] = 0.0
+        command_matrix[:, COMMAND_LAYOUT.measured_torque] = 0.0
+
         import mujoco
         if self.init_var == 0:
             print(f"\n--- [Actuator Parameter Debug] ---")
@@ -536,11 +511,11 @@ class ComplianceController:
 
         command_matrix = np.asarray(command_matrix, dtype=np.float32).copy()
         self.sync_qpos(qpos)
-
+        
         # TODO 현재 시뮬레이션 시간 확인 및 출력 여부 결정
         current_time = time
         should_print = (current_time - self._last_print_time) >= 1.0
-
+        
         wrenches: Dict[str, npt.NDArray[np.float32]] = {}
         motor_torques_arr = self._smooth_motor_torques(motor_torques)
         bias = self.wrench_sim.bias_torque()
@@ -575,6 +550,7 @@ class ComplianceController:
             )
             if should_print:
                 print(f"\n--- [Debug @ {current_time:.1f}s] Site: {site} ---")
+                print(f"현재 모터 각도 {qpos[:9]}")
                 print(f"tau_raw  : {np.round(tau_raw[:3], 4)}")
                 print(f"tau_bias : {np.round(tau_bias[:3], 4)}")
                 print(f"EE_wrench: {np.round(wrench[:3], 4)}")
@@ -588,6 +564,8 @@ class ComplianceController:
                 continue
             command_matrix[idx, COMMAND_LAYOUT.measured_force] = wrench[:3]
             command_matrix[idx, COMMAND_LAYOUT.measured_torque] = wrench[3:6]
+            # command_matrix[idx, COMMAND_LAYOUT.measured_force] = np.zeros(3)
+            # command_matrix[idx, COMMAND_LAYOUT.measured_torque] = np.zeros(3)
 
         if self.compliance_ref is not None:
             if self._last_state is None:
@@ -600,14 +578,17 @@ class ComplianceController:
             self._last_state = state_ref
 
         if should_print and state_ref is not None:
-            # [수정] state_ref는 객체이므로 x_ref 필드에 접근
-            x_obs = self.get_x_obs()[0] 
 
-            print(f"Target Pose (x_ref): {np.round(state_ref.x_ref[:,:], 4)}")
-            print(f"Actual Pose (x_obs): {np.round(state_ref.x_ref[:,:], 4)}")
+            # [수정된 출력부]
+            # state_ref.x_ref는 (sites, 6) 형태이므로 전체를 출력합니다.
+            print(f"Target Pose (x_ref): {np.round(state_ref.x_ref, 4)}")
+            x_obs = self.get_x_obs()
+            # x_obs도 (sites, 6) 형태이므로 그대로 출력합니다.  
+            print(f"Actual Pose (x_obs): {np.round(x_obs, 4)}")
 
-            # 오차(Error)도 함께 찍어주면 아주 좋습니다.
-            pos_error = np.linalg.norm(state_ref.x_ref[0, :3] - x_obs[:3])
+            # 오차(Error) 계산: 첫 번째 사이트(0번) 기준
+            # x_obs[0]은 첫 번째 사이트의 [x, y, z, q1, q2, q3]입니다.
+            pos_error = np.linalg.norm(state_ref.x_ref[0, :3] - x_obs[0, :3])
             print(f"Position Error     : {pos_error:.6f} m")
             
 

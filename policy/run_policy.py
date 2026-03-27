@@ -52,6 +52,7 @@ def _build_sim(
     control_dt: float,
     xml_path: str,
     merged_config: dict[str, Any],
+    use_camera : bool
 ) -> Any:
     if args.sim == "mujoco":
         model = mujoco.MjModel.from_xml_path(xml_path)
@@ -72,6 +73,7 @@ def _build_sim(
             vis=args.vis != "none",
             custom_pd=custom_pd,
             merged_config=merged_config,
+            use_camera=use_camera, # <-- 여기에 추가!
         )
     else:
         if str(args.robot).strip().lower() == "g1":
@@ -357,7 +359,8 @@ def _validate_arg_combination(parsed: argparse.Namespace) -> None:
     policy = str(parsed.policy).strip().lower()
     sim = str(parsed.sim).strip().lower()
 
-    real_only_policies = {"compliance_vlm", "compliance_dp"}
+    # real_only_policies = {"compliance_vlm", "compliance_dp"}
+    real_only_policies = {"compliance_dp"}
     if policy in real_only_policies and sim != "real":
         allowed = ", ".join(sorted(real_only_policies))
         raise ValueError(
@@ -380,6 +383,7 @@ def main(args: Sequence[str] | None = None) -> None:
     if str(parsed.policy) == "compliance_vlm" and str(parsed.robot) in {
         "toddlerbot",
         "leap",
+        "fr"
     }:
         gin_file = f"{parsed.robot}_vlm.gin"
     elif str(parsed.policy) == "compliance_model_based":
@@ -394,6 +398,7 @@ def main(args: Sequence[str] | None = None) -> None:
     else:
         gin_file = f"{parsed.robot}.gin"
     gin_path = os.path.join(_repo_root(), "config", gin_file)
+    print(f"Loading gin file : {gin_file}")
     gin.parse_config_file(gin_path, skip_unknown=True)
     motor_cfg_paths = MotorConfigPaths()
     if (
@@ -416,12 +421,15 @@ def main(args: Sequence[str] | None = None) -> None:
     xml_path_raw = str(controller_cfg.xml_path)
     xml_path = _resolve_repo_path(xml_path_raw)
 
+    use_camera = (str(parsed.policy) == "compliance_vlm") # VLM을 사용하면 시뮬레이션에서 카메라를 사용
+    # use_camera = False
     # TODO : 실제 로봇 hardware와 통신할 sim객체를 생성
     sim = _build_sim(
         parsed,
         control_dt=float(getattr(parsed, "control_dt", 0.02)),
         xml_path=xml_path,
         merged_config=merged_config,
+        use_camera=use_camera
     )
 
     if parsed.sim == "mujoco":
@@ -477,6 +485,7 @@ def main(args: Sequence[str] | None = None) -> None:
             model=sim.model,
             site_ids=np.asarray(policy.force_site_ids, dtype=np.int32),
         )
+    
 
     run_policy(sim=sim, robot=str(parsed.robot), policy=policy)
 

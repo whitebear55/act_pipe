@@ -370,7 +370,6 @@ class CompliancePolicy:
     def _compute_reference_and_log(self, obs: Any) -> ComplianceState:
         qpos = np.asarray(obs.qpos, dtype=np.float32)
         motor_tor = np.asarray(obs.motor_tor, dtype=np.float32)
-
         command_matrix = self.build_command_matrix(
             np.asarray(self.pose_command, dtype=np.float32)
         )
@@ -518,6 +517,14 @@ class CompliancePolicy:
             self.perturb_site_forces[:] = 0.0
 
     def step(self, obs: Any, sim: Any) -> npt.NDArray[np.float32]:
+        if not hasattr(self, "_vlm_debug_done"):
+                print(f"self.base_pose_command :{self.base_pose_command} ")
+                print(f"self.pose_command :{self.pose_command} ")
+                print(f"self.default_state :{self.default_state} ")
+                print(f"self.default_motor_pos :{self.default_motor_pos} ")
+                print(f"self.default_qpos :{self.default_qpos} ")
+                print(f"self._has_initial_pose_override :{self._has_initial_pose_override} ")
+                self._vlm_debug_done = True
         has_mujoco_state = str(getattr(sim, "name", "")).lower() == "mujoco"
         if has_mujoco_state and bool(self.enable_force_perturbation):
             if self.perturb_site_forces is None:
@@ -583,7 +590,7 @@ class CompliancePolicy:
             )
 
         state_ref = self._compute_reference_and_log(obs)
-        
+        # print(f"state_ref : {state_ref}")
         if self.use_compliance:
             action = np.asarray(state_ref.motor_pos, dtype=np.float32)
         else:

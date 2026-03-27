@@ -149,6 +149,7 @@ class MuJoCoSim(BaseSim):
         vis: bool = False,
         custom_pd: bool = False,
         merged_config: dict[str, Any] | None = None,
+        use_camera: bool = False, # 1. 인자 추가
     ) -> None:
         self.model = model
         self.data = data
@@ -192,6 +193,13 @@ class MuJoCoSim(BaseSim):
         self._debug_target_axis_length = 0.04
         self._site_name_to_id: Dict[str, int] = {}
         self._motor_target = np.asarray(self.data.ctrl, dtype=np.float32).copy()
+        self.use_camera = bool(use_camera) # 2. 할당 필수!
+
+        # Camera
+        if self.use_camera:
+            self.renderer = mujoco.Renderer(self.model,height=480, width=640)
+        else:
+            self.renderer = None # 카메라 안 쓰면 생성도 안 함!
 
     def step(self) -> None:
         for _ in range(self.n_substeps):
@@ -210,21 +218,38 @@ class MuJoCoSim(BaseSim):
             self.data.ctrl[:] = target
 
     def get_observation(self) -> Obs:
+        
+        # 1. 카메라 이미지를 담을 변수 초기화
+        left_img = None
+        right_img = None
+
+        # 2. [핵심] use_camera가 True일 때만 GPU를 사용하는 렌더링 실행!
+        if self.use_camera and self.renderer is not None:
+            # 왼쪽 카메라 렌더링
+            self.renderer.update_scene(self.data, camera="left_camera")
+            left_img = self.renderer.render().copy().astype(np.uint8)
+            
+            # 오른쪽 카메라 렌더링
+            self.renderer.update_scene(self.data, camera="right_camera")
+            right_img = self.renderer.render().copy().astype(np.uint8)
+        else:
+            # 카메라를 안 쓸 때는 빈 배열이나 더미 데이터를 넣어 오버헤드를 없앱니다.
+            # Obs 클래스가 이미지를 요구한다면 np.zeros((1,1,3)) 같은 최소 크기를 넣어주세요.
+            left_img = np.zeros((1, 1, 3), dtype=np.uint8)
+            right_img = np.zeros((1, 1, 3), dtype=np.uint8)
+
+        # 3. 데이터 반환
         return Obs(
             ang_vel=np.zeros(3, dtype=np.float32),
             time=float(self.data.time),
-            motor_pos=np.asarray(
-                self.data.qpos[self._qpos_adr], dtype=np.float32
-            ).copy(),
-            motor_vel=np.asarray(
-                self.data.qvel[self._qvel_adr], dtype=np.float32
-            ).copy(),
-            motor_acc=np.asarray(
-                self.data.qacc[self._qvel_adr], dtype=np.float32
-            ).copy(),
+            motor_pos=np.asarray(self.data.qpos[self._qpos_adr], dtype=np.float32).copy(),
+            motor_vel=np.asarray(self.data.qvel[self._qvel_adr], dtype=np.float32).copy(),
+            motor_acc=np.asarray(self.data.qacc[self._qvel_adr], dtype=np.float32).copy(),
             motor_tor=np.asarray(self.data.actuator_force, dtype=np.float32).copy(),
             qpos=np.asarray(self.data.qpos, dtype=np.float32).copy(),
             qvel=np.asarray(self.data.qvel, dtype=np.float32).copy(),
+            left_image=left_img,
+            right_image=right_img
         )
 
     def set_debug_site_targets(

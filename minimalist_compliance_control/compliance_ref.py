@@ -349,7 +349,7 @@ class ComplianceReference:
         pos_prev = x_prev[idx, :3]
         vel_prev = v_prev[idx, :3]
         pos_des = positions[idx]
-        pos_error = pos_des - pos_prev
+        pos_error = pos_des - pos_prev # 반대로 계산함으로써 바로 Kp랑 곱하는 것이 가능
 
         kp_term = np.matmul(kp_pos[idx], pos_error[..., None]).reshape(-1, 3)
         kd_term = np.matmul(kd_pos[idx], vel_prev[..., None]).reshape(-1, 3)
@@ -380,20 +380,22 @@ class ComplianceReference:
     def get_actuator_ref(
         self,
         data: mujoco.MjData,
-        x_ref: npt.NDArray[np.float32],
+        x_ref: npt.NDArray[np.float32], # World기준 EE의 목표 위치
     ) -> npt.NDArray[np.float32]:
         x_ref_ik = np.asarray(x_ref, dtype=np.float32)
         ik_data = data
+        # TODO : base 움직이는 지에 대한 분기 
         if self.fixed_model_xml_path is not None:
-            base_pos, base_quat = self._get_base_pose(data)
+            base_pos, base_quat = self._get_base_pose(data) # 로봇의 base가 월드 좌표계에서 어디있는지
             self._last_base_pos = base_pos.copy()
             self._last_base_quat = base_quat.copy()
-            x_ref_ik = self.transform_x_ref_to_base_frame(x_ref_ik, base_pos, base_quat)
+            x_ref_ik = self.transform_x_ref_to_base_frame(x_ref_ik, base_pos, base_quat) # 만약 base가 움직인다면 base기준으로 x_ref를 변환
             ik_data = self._copy_full_state_to_ik_data(data)
         else:
             self._last_base_pos = np.zeros(3, dtype=np.float32)
             self._last_base_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
+        # TODO : minkIK(항상 로봇의 base를 원점으로 가정하고 관절 각도를 계산)
         return self.mink_ik.solve(
             ik_data,
             x_ref_ik,

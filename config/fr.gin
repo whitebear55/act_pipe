@@ -54,7 +54,7 @@ WrenchEstimateConfig.axis_aligned = False
 WrenchEstimateConfig.normal_axis = "+z"
 
 # Compliance reference (fixed base)
-RefConfig.dt = 0.01
+RefConfig.dt = 0.02
 RefConfig.mass = 10.0
 RefConfig.inertia_diag = (1.0, 1.0, 1.0)
 # qpos: joint1~7 + finger_joint1 + finger_joint2 = 총 9개
@@ -67,7 +67,8 @@ RefConfig.default_qpos = (
 )
 # motor_pos: actuator1~7(arm) + actuator8(gripper) = 총 8개
 # actuator8 home = 255 (완전 열림, fr.xml keyframe ctrl 기준)
-RefConfig.default_motor_pos = (0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853, 255.0)
+#RefConfig.default_motor_pos = (0.0, -1.57079, 0.0,-4.712, 0.0, 1.57079, -0.7853, #0.0)
+RefConfig.default_motor_pos = (0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853, 0.0)
 IKConfig.ik_position_only = False
 IKConfig.mink_num_iter = 1
 IKConfig.mink_damping = 0.1
@@ -76,8 +77,11 @@ IKConfig.avoid_self_collision = False
 # Compliance policy fields
 ComplianceConfig.kp_pos = 100.0
 ComplianceConfig.kp_rot = 10.0
+#ComplianceConfig.initial_pose = (
+#    (5.6140e-01, -1.0000e-04,  5.9380e-01, -2.8802e+00, -1.1930e+00, 9.1200e-02),
+#)
 ComplianceConfig.initial_pose = (
-    (0.569, -0.0001, 0.6149,-2.896, -1.1996, 0.0281),
+    (0.5544995, 0.0, 0.6245024, 2.902512, 1.202093, 0.0),
 )
 
 

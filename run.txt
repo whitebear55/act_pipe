@@ -5,4 +5,4 @@
   mcc-run-policy --policy compliance --robot toddlerbot --sim real --vis none
   mcc-run-policy --policy compliance --robot arx --sim real --vis none
   mcc-run-policy --policy compliance --robot g1 --sim real --vis none --ip en0
-
+mcc-run-policy --policy compliance_vlm --robot fr --sim mujoco --vis view

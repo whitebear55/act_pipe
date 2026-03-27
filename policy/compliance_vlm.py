@@ -48,7 +48,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
         elif robot == "toddlerbot":
             gin_config_name = "toddlerbot_vlm.gin"
         elif robot == "fr":
-            gin_config_name = "fr.gin"
+            gin_config_name = "fr_vlm.gin"
         else:
             raise ValueError(f"Unsupported robot: {robot}")
 
@@ -86,13 +86,19 @@ class ComplianceVLMPolicy(CompliancePolicy):
         if not self.target_site_names:
             if self.robot == "leap":
                 self.target_site_names = ["mf_tip"]
-            else:
+            elif self.robot == "toddlerbot":
                 self.target_site_names = ["left_hand_center"]
+            # TODO : target_site_name을 수정해야함
+            elif self.robot == "fr":
+                self.target_site_names = ["attachment_site"]
+
+        print(f"self.target_site_names : {self.target_site_names}")
 
         # dimension check
         cfg_ref_motor_pos = np.asarray(
             self.compliance_cfg.ref_motor_pos, dtype=np.float32
         ).reshape(-1)
+        print(f"Motor의 기본 초기화값: {self.compliance_cfg.ref_motor_pos}")
         if cfg_ref_motor_pos.size > 0:
             if cfg_ref_motor_pos.shape[0] != self.default_motor_pos.shape[0]:
                 raise ValueError(
@@ -102,6 +108,8 @@ class ComplianceVLMPolicy(CompliancePolicy):
                 )
             self.ref_motor_pos = cfg_ref_motor_pos.copy()
 
+        print(f"Motor의 기본 초기화값2: {self.ref_motor_pos}")
+        
         self.neck_pitch_idx: Optional[int] = None
         if self.robot == "toddlerbot":
             motor_ordering: List[str] = [
@@ -124,7 +132,15 @@ class ComplianceVLMPolicy(CompliancePolicy):
         self.rest_pose_command = np.asarray(
             self.base_pose_command, dtype=np.float32
         ).copy()
-        self._set_rest_pose_from_ref_motor_pos()
+        if not self._has_initial_pose_override:
+            self._set_rest_pose_from_ref_motor_pos()
+        else:
+            # initial_pose가 있으면 그대로 rest_pose로 사용
+            self.rest_pose_command = np.asarray(self.base_pose_command, dtype=np.float32).copy()
+            print(f"DEBUG: Computed Rest Pose = {self.rest_pose_command}")
+        # self._set_rest_pose_from_ref_motor_pos()
+
+        print(f"DEBUG: Computed Rest Pose = {self.rest_pose_command}") # ref_motor_pos로 계산된 값
 
         # "지우개로 화이트보드 닦아줘"라는 명령을 할 때!
         self.status = "waiting"
@@ -189,7 +205,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
         self.set_stiffness(
             pos_stiffness=[400.0, 400.0, 400.0], rot_stiffness=[40.0, 40.0, 40.0]
         )
-
+    
     def reset(self) -> None:
         self.traj_start_time = None
         self.trajectory_plans = {}
@@ -226,6 +242,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
             dtype=np.float32,
         )
         self.rest_pose_command = rest_pose # 아무일도 안할 때 돌아올 휴식 위치
+        print(f"로봇의 초기 각도 : {self.rest_pose_command}")
         self.pose_command[:, :] = self.rest_pose_command # 실제 외력에 반응하면서 움직이는 실제 경로
         self.base_pose_command[:, :] = self.rest_pose_command # 이상적인 경로(외력이 없을때)
 
@@ -484,15 +501,28 @@ class ComplianceVLMPolicy(CompliancePolicy):
             "Configure ComplianceConfig.head_name in *_vlm.gin."
         )
 
-    def _get_stereo_images(self) -> tuple[np.ndarray, np.ndarray]:
+    def _get_stereo_images(self,obs: Any = None) -> tuple[np.ndarray, np.ndarray]:
+        
+        print("get_stereo camera함수 실행됨")
+        if obs is not None:
+                # hasattr 대신 dict나 object 속성을 직접 체크
+                left = getattr(obs, "left_image", None)
+                right = getattr(obs, "right_image", None)
+                
+                if left is not None:
+                    # print("DEBUG: Simulation Images Found!") # 주석 해제하여 확인
+                    return self._to_hwc_u8(left), self._to_hwc_u8(right if right is not None else left)
+        
         if self.left_camera is not None:
             try:
                 self.last_left_frame = self.left_camera.get_frame()
+                print(f"left camera get!")
             except Exception:
                 pass
         if self.right_camera is not None:
             try:
                 self.last_right_frame = self.right_camera.get_frame()
+                print(f"right camera get!")
             except Exception:
                 pass
 
@@ -605,7 +635,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
         if has_fixed_trajectory and not self.trajectory_plans:
             return
 
-        left_image, right_image = self._get_stereo_images() # Img Get
+        left_image, right_image = self._get_stereo_images(obs) # Img Get
         head_pos, head_quat = self.get_head_pose() # 눈의 위치 GET
         output_dir = self.get_prediction_output_dir(self.prediction_counter) 
         site_names = list(self.target_site_names) 
@@ -807,9 +837,12 @@ class ComplianceVLMPolicy(CompliancePolicy):
     ) -> npt.NDArray[np.float32]:
         # 부모 클래스 호출(compliancePolicy)을 통해 기본적인 어드미턴스 제어 수식을 먼저 실행
         # TODO : 기본 Control loop를 먼저 돌림 -> action(관절 토크, 목표 관절 각도)
+
         action = np.asarray(super().step(obs, sim), dtype=np.float32)
+        
 
         self.check_mode_command()
+        
 
         # 로봇이 초기자세를 잡는 중이라면, VLM로직을 건너 뛰고, 기본 동작만 수행함
         if not bool(getattr(self, "is_prepared", False)):
@@ -828,6 +861,14 @@ class ComplianceVLMPolicy(CompliancePolicy):
         # 한번 닦기를 완료했으면, 다 닦였나?를 확인하기 위해 VLM을 호출하여 다시 물어볼 준비
         if self.status == "waiting":
             self.wipe_pause_end_time = None
+            if not hasattr(self, "_vlm_debug_done"):
+                print(f"self.base_pose_command :{self.base_pose_command} ")
+                print(f"self.pose_command :{self.pose_command} ")
+                print(f"self.default_state :{self.default_state} ")
+                print(f"self.default_motor_pos :{self.default_motor_pos} ")
+                print(f"self.default_qpos :{self.default_qpos} ")
+                print(f"self._has_initial_pose_override :{self._has_initial_pose_override} ")
+                self._vlm_debug_done = True
             return np.asarray(action, dtype=np.float32)
 
         if self.status != "wiping":
@@ -841,6 +882,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
                 self.request_prediction_after_completion()
             else:
                 self._consume_prediction(float(obs.time))
+                print("33333333")
                 return np.asarray(action, dtype=np.float32)
 
 
@@ -868,14 +910,15 @@ class ComplianceVLMPolicy(CompliancePolicy):
             self.prepare_fixed_plan() # .lz4파일에서 데이터를 읽어와 경로를 저장
 
         self.maybe_start_prediction(obs, has_fixed_trajectory) # VLM에게 예측을 시킬지 판단
+        print("4444444444444")
         self._consume_prediction(float(obs.time)) # VLM이 답변을 다 했는지 확인 및 답변이 왔다면 새 경로로 경로 계확
         self._apply_trajectory(float(obs.time)) 
-
-        left, right = self._get_stereo_images()
+        print("5555555555555555")
+        left, right = self._get_stereo_images(obs)
         if self.record_video:
             self.start_video_logging()
             self.log_camera_frame(float(obs.time), left, right)
-
+        print("66666666666666")
         return np.asarray(action, dtype=np.float32)
 
     def close(self, exp_folder_path: str = "") -> None:

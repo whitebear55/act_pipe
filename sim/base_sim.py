@@ -30,6 +30,9 @@ class Obs:
     motor_pwm: np.ndarray | None = None
     motor_vin: np.ndarray | None = None
     motor_temp: np.ndarray | None = None
+    left_image: np.ndarray | None = None  # 추가
+    right_image: np.ndarray = None # 추가
+
 
 
 @runtime_checkable

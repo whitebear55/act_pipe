@@ -29,6 +29,11 @@
       <inertial pos="0 0 0" mass="0.5" diaginertia="0.001 0.001 0.001"/>
       <geom name="box_geom" type="box" size="0.03 0.03 0.03" rgba="1 0 0 1" friction="1 0.005 0.0001"/>
     </body>
+    
+    <body name="stereo_cameras" pos="1.1 0 0.8" euler="0 0.75 1.57">
+      <camera name="left_camera"  pos="0.03 0.0 0.03" fovy="60"/>
+      <camera name="right_camera" pos="-0.03 0.0 0.03" fovy="60"/>
+    </body>
 
     </worldbody>
 </mujoco>
