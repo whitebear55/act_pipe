@@ -3,3 +3,4 @@ hg_token.txt
 __pycache__/
 *.pyc
 .venv/
+/result
