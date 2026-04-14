@@ -1,0 +1,8 @@
+1. pre setup
+pip install gin-config
+pip install joblib
+pip install mink
+export PYTHONPATH=$PYTHONPATH:/home/aloha/aloha_mcc/src
+
+2. run(src경로에서 실행)
+python3 policy/admittance_only.py

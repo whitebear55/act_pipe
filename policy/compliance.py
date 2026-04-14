@@ -33,12 +33,18 @@ from minimalist_compliance_control.wrench_estimation import WrenchEstimateConfig
 @gin.configurable
 @dataclass
 class ComplianceConfig:
-    kp_pos: Any = 100.0
-    kp_rot: Any = 10.0
+    kp_pos: Any = 0.0
+    kp_rot: Any = 0.0
+    kd_pos: Any = 1.0
+    kd_rot: Any = 1.0
     kp_pos_normal: Optional[float] = None
     kp_pos_tangent: Optional[float] = None
     kp_rot_normal: Optional[float] = None
     kp_rot_tangent: Optional[float] = None
+    kd_pos_normal: Optional[float] = None
+    kd_pos_tangent: Optional[float] = None
+    kd_rot_normal: Optional[float] = None
+    kd_rot_tangent: Optional[float] = None
     fixed_contact_force: Optional[float] = None
     head_name: str = "head"
     initial_pose: Sequence[Sequence[float]] = ()
@@ -85,6 +91,9 @@ class CompliancePolicy:
             # fr 추가
             elif self.robot == "fr":
                 selected_config_name = "fr.gin"
+            # aloha 추가
+            elif self.robot == "aloha":
+                selected_config_name = "aloha.gin"
             else:
                 selected_config_name = "toddlerbot.gin"
 
@@ -221,10 +230,20 @@ class CompliancePolicy:
 
         self.is_prepared = False
 
-        self.set_stiffness(compliance_cfg.kp_pos, compliance_cfg.kp_rot)
+        self.set_stiffness(
+            pos_stiffness = compliance_cfg.kp_pos,
+            rot_stiffness = compliance_cfg.kp_rot,
+            # pos_damping = compliance_cfg.kd_pos,
+            # rot_damping = compliance_cfg.kd_rot
+        )
         
         self._last_print_time = 0.0  # [추가] 1초 주기 출력을 위한 변수
         self.last_gripper_pos = 0.0 # gripper 값을 저장하는 변수
+        
+        print(f"pos_stiffness : {self.pos_stiffness}")
+        print(f"rot_stiffness : {self.rot_stiffness}")
+        print(f"pos_damping : {self.pos_damping}")
+        print(f"rot_damping : {self.rot_damping}")
 
     def set_stiffness(
         self,
@@ -268,6 +287,22 @@ class CompliancePolicy:
     def update_pose_command_from_obs(self, x_obs: npt.NDArray[np.float32]) -> None:
         if self.pose_command is None:
             self.pose_command = x_obs.copy()
+    # TODO
+    '''
+    # compliance_ref.py의 CommandLayout
+    width: int = 54
+
+    position       : slice(0,  3)   # 목표 EE 위치 [x, y, z]
+    orientation    : slice(3,  6)   # 목표 EE 방향 [rx, ry, rz]
+    measured_force : slice(6,  9)   # 추정된 외력 [fx, fy, fz]
+    measured_torque: slice(9,  12)  # 추정된 외부토크 [tx, ty, tz]
+    kp_pos         : slice(12, 21)  # 위치 강성 행렬 (3x3 flatten)
+    kp_rot         : slice(21, 30)  # 회전 강성 행렬
+    kd_pos         : slice(30, 39)  # 위치 감쇠 행렬
+    kd_rot         : slice(39, 48)  # 회전 감쇠 행렬
+    force          : slice(48, 51)  # 명령 힘 fcmd
+    torque         : slice(51, 54)  # 명령 토크
+    '''
 
     def build_command_matrix(
         self,
@@ -509,14 +544,13 @@ class CompliancePolicy:
             self.perturb_site_forces[:] = 0.0
 
     def step(self, obs: Any, sim: Any) -> npt.NDArray[np.float32]:
-        # if not hasattr(self, "_vlm_debug_done"):
-        #         print(f"self.base_pose_command :{self.base_pose_command} ")
-        #         print(f"self.pose_command :{self.pose_command} ")
-        #         print(f"self.default_state :{self.default_state} ")
-        #         print(f"self.default_motor_pos :{self.default_motor_pos} ")
-        #         print(f"self.default_qpos :{self.default_qpos} ")
-        #         print(f"self._has_initial_pose_override :{self._has_initial_pose_override} ")
-        #         self._vlm_debug_done = True
+        current_time = time.monotonic()
+        should_print = (current_time - self._last_print_time) >= 2.0
+        # if should_print:
+        #         print(f"\nmotor_tor  : {obs.motor_tor}")
+        #         print(f"\motor_pos  : {obs.motor_pos}")
+        #         self._last_print_time = current_time 
+
         has_mujoco_state = str(getattr(sim, "name", "")).lower() == "mujoco"
         if has_mujoco_state and bool(self.enable_force_perturbation):
             if self.perturb_site_forces is None:
@@ -589,12 +623,12 @@ class CompliancePolicy:
             action = self.compute_direct_action()
 
         # TODO
-        action = np.asarray(state_ref.motor_pos, dtype=np.float32).flatten()
-        # ⬇️ 제어기가 계산한 8번째 값을 무시하고, '내 입력값'으로 강제 교체!
-        action[7] = self.last_gripper_pos * 255.0
+        # action = np.asarray(state_ref.motor_pos, dtype=np.float32).flatten()
+        # # ⬇️ 제어기가 계산한 8번째 값을 무시하고, '내 입력값'으로 강제 교체!
+        # action[7] = self.last_gripper_pos * 255.0
 
-        return np.asarray(action, dtype=np.float32)
-        # return action
+        # return np.asarray(action, dtype=np.float32)
+        return action
     
     def save_compliance_ref_log(self, exp_folder_path: str) -> None:
         if not exp_folder_path:

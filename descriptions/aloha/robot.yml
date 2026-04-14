@@ -1,0 +1,137 @@
+robot:
+    hand_name: right/gripper_link
+    com_x: 0.0
+    com_z: 0.2
+
+# ──────────────────────────────────────────────────────────────
+# 액추에이터 타입별 전기적 파라미터
+#
+#  cur_sensor가 True이면 Dynamixel의 Present_Current 레지스터를 직접 읽어
+#  전류를 측정하므로, kv와 r_winding은 사용되지 않음 (kt만 중요)
+#
+#  kt  : 토크 상수 [N·m/A] (모터 샤프트 기준, 기어박스 앞단)
+#        → 실측값으로 반드시 교체 필요
+#        XM540-W270 추정값: stall_torque(10.6Nm) / (gear_ratio(272.5) * efficiency(0.7) * stall_current(4.4A))
+#        XM430-W350 추정값: stall_torque( 3.1Nm) / (gear_ratio(353.5) * efficiency(0.7) * stall_current(2.2A))
+#
+#  kv  : 속도 상수 [rad/s/V] (출력축 기준)
+#        = no_load_speed[rad/s] / bus_voltage[V]
+#        XM540/XM430 공통: 57.2RPM @ 12V → 5.99rad/s / 12V ≈ 0.499
+#
+#  r_winding : 권선 저항 [Ω] - cur_sensor=True이면 미사용
+# ──────────────────────────────────────────────────────────────
+actuators:
+    gain_backdrive: 1.0
+
+    XM540-W270:
+        kt: 0.01263       # [N·m/A] ← 실측값으로 교체 필요 (datasheet 추정값)
+#        kt : 2.4091
+        kv: 0.499         # [rad/s/V] (cur_sensor=True이면 미사용)
+        r_winding: 6.8    # [Ω]      (cur_sensor=True이면 미사용)
+
+    XM430-W350:
+        kt: 0.00569       # [N·m/A] ← 실측값으로 교체 필요 (datasheet 추정값)
+#        kt : 1.793
+        kv: 0.499         # [rad/s/V] (cur_sensor=True이면 미사용)
+        r_winding: 5.1    # [Ω]      (cur_sensor=True이면 미사용)
+
+motors:
+    # ── 오른팔 (Right Arm) ─────────────────────────────────────
+    right/waist:
+        motor: XM540-W270
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+        
+    right/shoulder:
+        motor: XM540-W270
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    right/elbow:
+        motor: XM540-W270
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    right/forearm_roll:
+        motor: XM540-W270
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    right/wrist_angle:
+        motor: XM540-W270
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    right/wrist_rotate:
+        motor: XM430-W350
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    right/left_finger:
+        motor: XM430-W350
+        group: gripper
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    # ── 왼팔 (Left Arm) ────────────────────────────────────────
+    left/waist:
+        motor: XM540-W270
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    left/shoulder:
+        motor: XM540-W270
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    left/elbow:
+        motor: XM540-W270
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    left/forearm_roll:
+        motor: XM540-W270
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    left/wrist_angle:
+        motor: XM540-W270
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    left/wrist_rotate:
+        motor: XM430-W350
+        group: arm
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0
+
+    left/left_finger:
+        motor: XM430-W350
+        group: gripper
+        kp: 800.0
+        kd: 0.0
+        ki: 0.0

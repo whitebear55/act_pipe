@@ -1,0 +1,116 @@
+# aloha.gin
+# Mobile ALOHA 어드미턴스 제어 설정
+#
+# 실행 방법:
+#   python -m policy.run_policy \
+#       --robot aloha \
+#       --sim real \
+#       --policy compliance \
+#       --vis none
+# ─────────────────────────────────────────────────────────────
+
+# ── 설정 파일 경로 ──────────────────────────────────────────
+MotorConfigPaths.default_config_path = "descriptions/default.yml"
+MotorConfigPaths.robot_config_path   = "descriptions/aloha/robot.yml"
+MotorConfigPaths.motor_config_path   = "descriptions/aloha/motors.yml"
+
+# ── 컨트롤러 핵심 설정 ─────────────────────────────────────
+ControllerConfig.xml_path   = "descriptions/aloha/aloha_mobile.xml"
+ControllerConfig.site_names = ["left/gripper", "right/gripper"]
+ControllerConfig.fixed_base = True
+
+# 토크 추정에 EMA 필터 적용 (α=0.9: Dynamixel 기본, 노이즈 큰 경우 낮춤)
+ControllerConfig.motor_torque_ema_alpha = 0.9
+
+# 각 EE 사이트별 제어 대상 모터 (그리퍼 제외, arm 6-DOF만)
+ControllerConfig.motor_names_by_site = {
+    "left/gripper":  [
+        "left/waist", "left/shoulder", "left/elbow",
+        "left/forearm_roll", "left/wrist_angle", "left/wrist_rotate",
+    ],
+    "right/gripper": [
+        "right/waist", "right/shoulder", "right/elbow",
+        "right/forearm_roll", "right/wrist_angle", "right/wrist_rotate",
+    ],
+}
+
+# 각 EE 사이트에 영향을 주는 관절 이름 (FK/Jacobian 계산용, XML joint name과 일치)
+ControllerConfig.joint_names_by_site = {
+    "left/gripper":  [
+        "left/waist", "left/shoulder", "left/elbow",
+        "left/forearm_roll", "left/wrist_angle", "left/wrist_rotate",
+    ],
+    "right/gripper": [
+        "right/waist", "right/shoulder", "right/elbow",
+        "right/forearm_roll", "right/wrist_angle", "right/wrist_rotate",
+    ],
+}
+
+# 감속비 (기어박스 감속비)
+#   XM540-W270: 272.5:1 (waist, shoulder, elbow, forearm_roll, wrist_angle)
+#   XM430-W350: 353.5:1 (wrist_rotate)
+#ControllerConfig.gear_ratios_by_site = {
+#    "left/gripper":  [272.5, 272.5, 272.5, 272.5, 272.5, 353.5],
+#    "right/gripper": [272.5, 272.5, 272.5, 272.5, 272.5, 353.5],
+#}
+ControllerConfig.gear_ratios_by_site = {
+     "left/gripper":  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+     "right/gripper": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+}
+# ── WrenchSim 설정 (MuJoCo FK/Jacobian 계산용) ────────────
+WrenchSimConfig.xml_path   = "descriptions/aloha/aloha_mobile_scene.xml"
+WrenchSimConfig.site_names = ["left/gripper", "right/gripper"]
+WrenchSimConfig.fixed_base = True
+WrenchSimConfig.view   = False
+WrenchSimConfig.render = False
+
+# ── 외력 추정 설정 ──────────────────────────────────────────
+# axis_aligned=False: 전방향 6DOF 외력 추정 (단순 접촉 작업에 적합)
+# force_only=True: 토크 추정 비활성화 (초기 테스트 권장)
+WrenchEstimateConfig.force_reg    = 1e-3
+WrenchEstimateConfig.torque_reg   = 1e-2
+WrenchEstimateConfig.force_only   = True      # 초기엔 force만 추정
+WrenchEstimateConfig.axis_aligned = False
+
+# ── 어드미턴스 레퍼런스 설정 ────────────────────────────────
+RefConfig.dt           = 0.02              # 50Hz 제어 주기
+#RefConfig.mass         = 10.0              # 가상 질량 [kg]
+#RefConfig.inertia_diag = (10.0,10.0,10.0)  # 가상 관성
+
+RefConfig.mass         = 2.0              # 가상 질량 [kg]
+RefConfig.inertia_diag = (2.0,2.0,2.0)  # 가상 관성
+
+RefConfig.fixed_model_xml_path = None
+RefConfig.default_qpos = [
+    0.0, -0.96, 1.16, 0.0, -0.3, 0.0, 0.02239, 0.02239,
+    0.0, -0.96, 1.16, 0.0, -0.3, 0.0, 0.02239, 0.02239
+]
+#RefConfig.default_qpos = [
+  #  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02239, 0.02239,
+ #   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02239, 0.02239,
+#]
+# 기본 모터 위치 (zero pose, 보정 후 모두 0)
+# 순서: right/(waist,shoulder,elbow,forearm_roll,wrist_angle,wrist_rotate,finger)
+#       left/ (waist,shoulder,elbow,forearm_roll,wrist_angle,wrist_rotate,finger)
+
+# 기본 qpos (MuJoCo, 관절 순서: left 먼저 → right)
+# left:  waist,shoulder,elbow,forearm_roll,wrist_angle,wrist_rotate,left_finger,right_finger
+# right: waist,shoulder,elbow,forearm_roll,wrist_angle,wrist_rotate,left_finger,right_finger
+RefConfig.default_motor_pos = [
+    0.0, -0.96, 1.16, 0.0, -0.3, 0.0, 0.02239,
+    0.0, -0.96, 1.16, 0.0, -0.3, 0.0, 0.02239
+]
+#RefConfig.default_motor_pos = [
+#    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02239, 
+#    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02239
+#]
+# ── 컴플라이언스 정책 설정 ──────────────────────────────────
+# kp_pos: 위치 강성 [N/m] - 낮을수록 유연 (초기 테스트: 100~150)
+# kp_rot: 회전 강성 [N·m/rad]
+ComplianceConfig.kp_pos         = 50.0
+ComplianceConfig.kp_rot         = 5.0
+#ComplianceConfig.kd_pos         = 14.17
+#ComplianceConfig.kd_rot         = 4.47
+ComplianceConfig.use_compliance = True
+ComplianceConfig.perturb_force_max = 3.0   # 랜덤 외란 최대 크기 [N] (시뮬레이션 전용)
+

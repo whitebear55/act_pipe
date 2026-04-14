@@ -74,20 +74,25 @@ class CompliancePredictor:
 
     # @profile()
     def invoke_model(self, prompt: str, images_data: str) -> Optional[Dict[str, Any]]:
+
         t0 = time.perf_counter()
         headers = self.provider.get_headers()
         payload = self.provider.format_request( # MODEL에 맞게 데이터를 포장
             prompt, images_data, self.model, self.api_settings
         )
 
+        # AI에게 보내는 사진의 용량 계산
         img_b64_bytes = (
-            images_data.encode("utf-8")
-            if isinstance(images_data, str)
-            else bytes(images_data)
+            images_data.encode("utf-8") # 바이트 형태로 변환
+            if isinstance(images_data, str) # 이미지 데이터가 str형태라면 
+            else bytes(images_data) # 이미 바이트 형태라면 
         )
+
+        # json.dumps : 파이썬 객체를 인터넷으로 전송 가능한 JSON 텍스트로 번역해주는 함수
         payload_bytes = json.dumps(
-            payload, separators=(",", ":"), ensure_ascii=False
+            payload, separators=(",", ":"), ensure_ascii=False # 공백 제어, 한글 유지 
         ).encode("utf-8")
+
         t1 = time.perf_counter()
         print(
             "[CompliancePredictor] invoke_model payload ready in "
@@ -98,17 +103,21 @@ class CompliancePredictor:
         timeout = self.api_settings.get("timeout", 120)
         api_url = self.provider.get_api_url()
         full_url = self.provider.get_url_with_params(api_url)
+
         t2 = time.perf_counter()
-        response = requests.post(
+        # Data SEND 
+        response = requests.post( 
             full_url, headers=headers, json=payload, timeout=timeout
         )
         t3 = time.perf_counter()
-        post_wall = t3 - t2
+        post_wall = t3 - t2 # 데이터를 보내고 받을 때 까지의 걸린 전체 시간(네트워크 지연, 인터넷 상태, 서버대기 등 포함)
+        # 서버 순수 연산 시간
         response_elapsed = (
             response.elapsed.total_seconds()
             if getattr(response, "elapsed", None) is not None
             else float("nan")
         )
+         # 어디서 병목현상이 발생하는지 파악
         print(
             "[CompliancePredictor] invoke_model POST completed in "
             f"{post_wall:.3f}s (response.elapsed={response_elapsed:.3f}s)"
@@ -118,8 +127,9 @@ class CompliancePredictor:
             print(f"API Error {response.status_code}: {response.text}")
             response.raise_for_status()
 
-        result = response.json()
+        result = response.json() # JSON형태로 받은 데이터를 dict형식으로 변환
 
+        # 답변이 제대로 들어있는지 확인
         if self.provider.request_format == "openai":
             if "choices" not in result or not result["choices"]:
                 print("Error: No choices in response.")
@@ -135,7 +145,7 @@ class CompliancePredictor:
                     print(f"API Error details: {result['error']}")
                 return None
 
-        content = self.provider.parse_response(result)
+        content = self.provider.parse_response(result) # AI가 응답한 문장(String)만 추출
 
         if not content or content.strip() == "":
             print("Error: Empty response from API")
@@ -156,7 +166,7 @@ class CompliancePredictor:
             json_str = json_str + "\n}"
 
         try:
-            contact_data = json.loads(json_str)
+            contact_data = json.loads(json_str) # 실제 응답 좌표를 딕셔너리 형태로 변환
         except json.JSONDecodeError as exc:
             print(f"Error decoding JSON: {exc}\nResponse content: {content}")
             return None
@@ -192,7 +202,7 @@ class CompliancePredictor:
             parsed = self.parse_contact_data(entry) # JSON내의 contact_sequence 또는 contact_range 키를 찾아 그 안에 담긴 [x,y] 좌표들을 순서대로 추출
             if parsed is None:
                 continue
-            results[site_name] = parsed
+            results[site_name] = parsed # 로봇 부위별로 정제된 이동 경로(좌표) 딕셔너리
 
         return prompt, results
 
@@ -237,6 +247,13 @@ class CompliancePredictor:
                 object_label,
                 candidate_point_groups=candidate_point_groups,
             )
+        
+        if "pick" in normalized_task:                    # ← 추가
+            return self.create_pick_prompt(
+                task_description,
+                object_label,
+                candidate_point_groups=candidate_point_groups,
+        )
 
         raise NotImplementedError(
             f"Unsupported task description for compliance prompt: {task_description}"
@@ -335,4 +352,38 @@ JSON RULES:
 BEGIN OUTPUT:
 """
 
+        return prompt_template
+
+    def create_pick_prompt(
+    self,
+    task_description: str,
+    object_label: str,
+    candidate_point_groups: Dict[str, List[Dict[str, int]]],
+    ) -> str:
+        candidate_lines = self.format_candidate_group_lines(candidate_point_groups)
+        site_names = list(candidate_point_groups.keys())
+        json_lines = self.format_json_lines(site_names)
+
+        prompt_template = f"""
+    TASK: {task_description}
+    TARGET OBJECT: {object_label}
+    CANDIDATE CONTACT POINTS (pixel coordinates), grouped by site:
+    {candidate_lines}
+
+    ACTION REQUIREMENTS:
+    - Identify the single best contact point on the {object_label} for grasping.
+    - Choose the point at the top surface or visible center of the object.
+    - The point must be ON the object, not on the background.
+    - Return exactly ONE contact point per site.
+
+    OUTPUT JSON FORMAT:
+    {json_lines}
+
+    JSON RULES:
+    ✓ Return valid JSON with double quotes.
+    ✓ Return exactly one contact_point per site.
+    ✓ Do not include explanations.
+
+    BEGIN OUTPUT:
+    """
         return prompt_template

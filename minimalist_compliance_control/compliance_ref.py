@@ -145,6 +145,7 @@ class ComplianceReference:
 
         default_state = self.get_default_state()
         self.site_home_pose = np.asarray(default_state.x_ref, dtype=np.float32).copy()
+        self._last_print_time = 0.0  # [추가] 1초 주기 출력을 위한 변수
 
     def _resolve_joint_qpos_indices(
         self, model: mujoco.MjModel, joint_names: Sequence[str]
@@ -323,6 +324,7 @@ class ComplianceReference:
         x_prev: npt.NDArray[np.float32],
         v_prev: npt.NDArray[np.float32],
         command_matrix: npt.NDArray[np.float32],
+        time
     ) -> tuple[
         npt.NDArray[np.float32],
         npt.NDArray[np.float32],
@@ -341,21 +343,25 @@ class ComplianceReference:
         kd_pos = command_matrix[:, COMMAND_LAYOUT.kd_pos].reshape(-1, 3, 3)
         kd_rot = command_matrix[:, COMMAND_LAYOUT.kd_rot].reshape(-1, 3, 3)
 
+        
         x_next = x_prev.copy()
         v_next = v_prev.copy()
         a_next = np.zeros_like(v_prev)
-
-        idx = np.arange(len(self.site_names), dtype=np.int32)
+        idx = np.arange(len(self.site_names), dtype=np.int32)      
         pos_prev = x_prev[idx, :3]
         vel_prev = v_prev[idx, :3]
         pos_des = positions[idx]
+        
         pos_error = pos_des - pos_prev # 반대로 계산함으로써 바로 Kp랑 곱하는 것이 가능
-
         kp_term = np.matmul(kp_pos[idx], pos_error[..., None]).reshape(-1, 3)
         kd_term = np.matmul(kd_pos[idx], vel_prev[..., None]).reshape(-1, 3)
         lin_acc = (kp_term - kd_term + net_force[idx]) / self.mass
         vel_next = vel_prev + lin_acc * self.dt
         pos_next = pos_prev + vel_next * self.dt
+        
+        current_time = time
+        should_print = (current_time - self._last_print_time) >= 1.0
+
 
         ori_prev = R.from_rotvec(x_prev[idx, 3:6])
         omega_prev = v_prev[idx, 3:6]
@@ -375,6 +381,8 @@ class ComplianceReference:
         a_next[idx, 0:3] = lin_acc
         a_next[idx, 3:6] = ang_acc
 
+        
+
         return x_next, v_next, a_next
 
     def get_actuator_ref(
@@ -382,16 +390,19 @@ class ComplianceReference:
         data: mujoco.MjData,
         x_ref: npt.NDArray[np.float32], # World기준 EE의 목표 위치
     ) -> npt.NDArray[np.float32]:
+        # print(f"다음 상태의 목적지점을 찾기위한 위치 : {x_ref}")
         x_ref_ik = np.asarray(x_ref, dtype=np.float32)
         ik_data = data
         # TODO : base 움직이는 지에 대한 분기 
         if self.fixed_model_xml_path is not None:
+            # print("base 움직입니다")
             base_pos, base_quat = self._get_base_pose(data) # 로봇의 base가 월드 좌표계에서 어디있는지
             self._last_base_pos = base_pos.copy()
             self._last_base_quat = base_quat.copy()
             x_ref_ik = self.transform_x_ref_to_base_frame(x_ref_ik, base_pos, base_quat) # 만약 base가 움직인다면 base기준으로 x_ref를 변환
             ik_data = self._copy_full_state_to_ik_data(data)
         else:
+            # print("base 움직이지않습니다")
             self._last_base_pos = np.zeros(3, dtype=np.float32)
             self._last_base_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
@@ -405,20 +416,26 @@ class ComplianceReference:
         )
 
     def get_state_ref(
-        self,
+        self,time,
         command_matrix: npt.NDArray[np.float32],
         last_state: ComplianceState,
         data: mujoco.MjData,
+        
     ) -> ComplianceState:
+        # print(f"last_state.x_ref : {last_state.x_ref}")
+        # print(f"last_state.v_ref : {last_state.v_ref}")
         x_ref, v_ref, a_ref = self.integrate_commands(
             np.asarray(last_state.x_ref, dtype=np.float32),
             np.asarray(last_state.v_ref, dtype=np.float32),
             command_matrix,
+            time
         )
+        # print(f"x_ref : {x_ref}")
         actuator_pos = self.get_actuator_ref(data, x_ref)
         x_ik = self.get_x_ik_world()
         motor_pos = self.default_motor_pos.copy()
         motor_pos[self.actuator_indices] = actuator_pos
+        
 
         return ComplianceState(
             x_ref=x_ref,

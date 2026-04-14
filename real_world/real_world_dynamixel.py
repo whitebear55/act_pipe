@@ -73,6 +73,9 @@ class RealWorldDynamixel(BaseSim):
         self.config = copy.deepcopy(merged_config)
 
         motors_cfg = self.config.get("motors", {})
+        print(f"------모터 종류!!------")
+        print(f"motors_cfg : {motors_cfg}")
+
         if not isinstance(motors_cfg, dict) or not motors_cfg:
             raise ValueError("Merged motor config is empty.")
         robot_root = _resolve_robot_xml_root(xml_path)
@@ -221,21 +224,29 @@ class RealWorldDynamixel(BaseSim):
         motor_pwm_arr: np.ndarray,
         motor_vin_arr: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # TODO 백드라이브(모터의 방향과 움직이는 방향의 관계) -> 얼마나 쉽게 밀릴것인가에 대한 감도 -> 크면 날라감
         gain_back = np.ones_like(motor_cur_arr, dtype=np.float32)
         gain_back[self.motor_groups == "arm"] = float(self.gain_backdrive)
-
+        
+        # 실제 인가 전압
         motor_duty = np.clip(motor_pwm_arr / 100.0, -1.0, 1.0)
         applied_voltage = motor_duty * motor_vin_arr
 
         cur_mask = self.cur_sensor_mask
+        
+        print(f"\n[DEBUG] 모터별 전류 센서 마스크 값:")
+        for name, has_sensor in zip(self.motor_names, cur_mask):
+            print(f"  - {name}: {'센서 O (True)' if has_sensor else '센서 X (False)'}")
 
+        # 역기전력
         back_emf = np.zeros_like(motor_vel_arr, dtype=np.float32)
         valid_kv = self.motor_kv != 0.0
         back_emf[valid_kv] = motor_vel_arr[valid_kv] / self.motor_kv[valid_kv]
 
+
         i_est = np.zeros_like(motor_vel_arr, dtype=np.float32)
-        i_est[cur_mask] = motor_cur_arr[cur_mask] / 1000.0
-        compute_mask = (~cur_mask) & (self.motor_r_winding != 0.0)
+        i_est[cur_mask] = motor_cur_arr[cur_mask] / 1000.0    # 전류센서가 있는 경우
+        compute_mask = (~cur_mask) & (self.motor_r_winding != 0.0) # 전류센서가 없는 경우
         i_est[compute_mask] = (
             applied_voltage[compute_mask] - back_emf[compute_mask]
         ) / self.motor_r_winding[compute_mask]
@@ -290,6 +301,7 @@ class RealWorldDynamixel(BaseSim):
     def sync(self) -> bool:
         return True
 
+    # TODO 전류로부터 토크를 구하는 함수
     def motor_cur_to_tor(
         self,
         motor_cur: np.ndarray,

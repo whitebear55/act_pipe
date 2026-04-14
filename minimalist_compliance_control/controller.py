@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional, Sequence
 
+import os 
+import matplotlib
+matplotlib.use("Agg")   # ← 반드시 plt import 전에!
+import matplotlib.pyplot as plt
+
 import gin
 import numpy as np
 import numpy.typing as npt
@@ -22,6 +27,9 @@ from minimalist_compliance_control.wrench_estimation import (
 )
 from minimalist_compliance_control.wrench_sim import WrenchSim, WrenchSimConfig
 
+# Wrench Cliping Range 설정
+MAX_FORCE  = 15.0  # N
+MAX_TORQUE =  3.0  # N·m
 
 @gin.configurable
 @dataclass
@@ -124,6 +132,28 @@ class ComplianceController:
         #TODO 
         self._last_print_time = 0.0  # [추가] 1초 주기 출력을 위한 변수
         self.init_var = 0 # 초기에 한번만 확인하는 변수 
+
+            # ── [추가] 정지 상태 오프셋 보정 ──────────────────────
+        self._tau_offset_by_site: Dict[str, npt.NDArray[np.float32]] = {}
+        self._tau_offset_accum:   Dict[str, npt.NDArray[np.float32]] = {}
+        self._tau_offset_count:   int  = 0
+        self._tau_offset_frames:  int  = 100   # 몇 프레임 평균낼지 (50Hz × 2초)
+        self._tau_offset_ready:   bool = False
+
+        # ── [추가] 시각화용 로그 버퍼 ────────────────────────────
+        # 구조: { site_name: { "tau_raw": [], "tau_bias": [], "wrench": [], "time": [] } }
+        self._log: Dict[str, Dict[str, list]] = {
+            site: {
+                "tau_raw":  [],   # shape: (T, 6)
+                "tau_bias": [],   # shape: (T, 6)
+                "wrench":   [],   # shape: (T, 6)
+                "motor_pos": [],
+                "time":     [],   # shape: (T,)
+            }
+            for site in self.config.site_names
+        }
+        self._log_save_dir = "logs"
+        os.makedirs(self._log_save_dir, exist_ok=True)
 
 
     @classmethod
@@ -437,11 +467,13 @@ class ComplianceController:
             if cfg.default_qpos is not None
             else np.asarray(data.qpos, dtype=np.float32).copy()
         )
+        print(f"default_qpos : {default_qpos}")
         default_motor_pos = (
             np.asarray(cfg.default_motor_pos, dtype=np.float32)
             if cfg.default_motor_pos is not None
             else np.zeros(model.nu, dtype=np.float32)
         )
+        print(f"default_motor_pos : {default_motor_pos}")
 
         self.compliance_ref = ComplianceReference(
             dt=float(cfg.dt),
@@ -461,6 +493,7 @@ class ComplianceController:
         )
         self._last_state = self.compliance_ref.get_default_state()
         if default_qpos is not None and default_qpos.size == model.nq:
+            print("initiallization 한번 수행")
             self.wrench_sim.set_qpos(default_qpos)
             self.wrench_sim.forward()
 
@@ -508,6 +541,7 @@ class ComplianceController:
                 kp = model.actuator_gainprm[i, 0]
                 kv = -model.actuator_biasprm[i, 2] # bias는 보통 음수로 걸리므로 양수로 변환
                 print(f"Actuator [{name}]: Kp={kp:.2f}, Kv={kv:.2f}")
+                
 
         command_matrix = np.asarray(command_matrix, dtype=np.float32).copy()
         self.sync_qpos(qpos)
@@ -519,6 +553,42 @@ class ComplianceController:
         wrenches: Dict[str, npt.NDArray[np.float32]] = {}
         motor_torques_arr = self._smooth_motor_torques(motor_torques)
         bias = self.wrench_sim.bias_torque()
+
+        # ── [추가] 오프셋 수집 단계 ───────────────────────────────
+        if not self._tau_offset_ready:
+            for site in self.config.site_names:
+                motor_idx = self._motor_indices_by_site[site]
+                joint_idx = self._joint_dof_indices_by_site[site]
+                gear      = self._site_gear_ratios.get(site)
+
+                tau_raw  = (
+                    motor_torques_arr[motor_idx] * gear
+                    if gear is not None
+                    else motor_torques_arr[motor_idx]
+                )
+                tau_bias = bias[joint_idx]
+                offset   = tau_raw - tau_bias   # 이상적으로 0이어야 할 값
+
+                if site not in self._tau_offset_accum:
+                    self._tau_offset_accum[site] = np.zeros_like(offset)
+                self._tau_offset_accum[site] += offset
+
+            self._tau_offset_count += 1
+
+            if self._tau_offset_count >= self._tau_offset_frames:
+                for site in self.config.site_names:
+                    self._tau_offset_by_site[site] = (
+                        self._tau_offset_accum[site] / self._tau_offset_frames
+                    ).astype(np.float32)
+                    print(f"\n[오프셋 보정 완료] site={site}")
+                    print(f"  tau_offset: {np.round(self._tau_offset_by_site[site], 4)}")
+                self._tau_offset_ready = True
+                print("  이후 스텝부터 오프셋 적용됩니다.\n")
+
+            # 수집 중에는 wrench 계산 스킵
+            return {site: np.zeros(6, dtype=np.float32)    
+                for site in self.config.site_names}, self._last_state
+        
         for site in self.config.site_names:
             jacp, jacr = self.wrench_sim.site_jacobian(site)
             motor_idx = self._motor_indices_by_site[site]
@@ -531,12 +601,21 @@ class ComplianceController:
                 tau_raw = motor_torques_arr[motor_idx] * gear
 
             tau_bias = bias[joint_idx]
+
+            # ── shape 체크 (tau_ext 계산 전에) ───────────────────
             if tau_raw.shape[0] != tau_bias.shape[0]:
                 raise ValueError(
-                    f"Shape mismatch at site {site!r}: tau_raw {tau_raw.shape} vs tau_bias {tau_bias.shape}. "
+                    f"Shape mismatch at site {site!r}: "
+                    f"tau_raw {tau_raw.shape} vs tau_bias {tau_bias.shape}. "
                     "Check motor_names_by_site / joint_names_by_site alignment."
                 )
-            tau_ext = -(tau_raw - tau_bias)
+
+            # ── [수정] 오프셋 보정 적용 ──────────────────────────
+            offset   = self._tau_offset_by_site.get(site)
+            tau_bias_corrected = (
+                tau_bias + offset if offset is not None else tau_bias
+            )
+            tau_ext = -(tau_raw - tau_bias_corrected)
 
             site_rot = self.wrench_sim.data.site_xmat[
                 self.wrench_sim.site_ids[site]
@@ -548,12 +627,41 @@ class ComplianceController:
                 site_rot,
                 self.estimate_config,
             )
-            # if should_print:
-            #     print(f"\n--- [Debug @ {current_time:.1f}s] Site: {site} ---")
-            #     print(f"현재 모터 각도 {qpos[:9]}")
-            #     print(f"tau_raw  : {np.round(tau_raw[:3], 4)}")
-            #     print(f"tau_bias : {np.round(tau_bias[:3], 4)}")
-            #     print(f"EE_wrench: {np.round(wrench[:3], 4)}")
+            # ── [추가] 외력 데드밴드 (잔류 노이즈 제거) ──────────────
+            FORCE_DEADBAND  = 1.0   # N  - 이 값 이하의 force는 0으로 처리
+            TORQUE_DEADBAND = 0.2   # N·m
+
+            wrench_filtered = wrench.copy()
+            wrench_filtered[:3] = np.where(
+                np.abs(wrench[:3]) < FORCE_DEADBAND, 0.0, wrench[:3]
+            )
+            wrench_filtered[3:] = np.where(
+                np.abs(wrench[3:]) < TORQUE_DEADBAND, 0.0, wrench[3:]
+            )
+            wrench = wrench_filtered
+
+            # wrench cliping!
+            if np.any(np.abs(wrench[:3]) > MAX_FORCE) or np.any(np.abs(wrench[3:]) > MAX_TORQUE):
+                wrench[:3] = np.clip(wrench[:3], -MAX_FORCE,  MAX_FORCE)
+                wrench[3:] = np.clip(wrench[3:], -MAX_TORQUE, MAX_TORQUE)
+                spike_detected = True
+            else : 
+                spike_detected = False
+
+            if should_print:
+                if spike_detected:
+                    print(f"  [경고] wrench 스파이크 감지 → 클리핑 적용")
+            
+                # ── 로그 버퍼에 저장 ──────────────────────────────────
+            if self._tau_offset_ready:   # 오프셋 수집 완료 후부터만 저장
+                self._log[site]["tau_raw"].append(tau_raw.copy())
+                self._log[site]["tau_bias"].append(tau_bias_corrected.copy())
+                self._log[site]["wrench"].append(wrench.copy())
+                self._log[site]["motor_pos"].append(
+                np.asarray(qpos, dtype=np.float32).copy()   # ← qpos 전체 저장
+                )
+                self._log[site]["time"].append(float(current_time))
+
 
             wrenches[site] = wrench 
 
@@ -566,35 +674,129 @@ class ComplianceController:
             command_matrix[idx, COMMAND_LAYOUT.measured_torque] = wrench[3:6]
             # command_matrix[idx, COMMAND_LAYOUT.measured_force] = np.zeros(3)
             # command_matrix[idx, COMMAND_LAYOUT.measured_torque] = np.zeros(3)
-
+        
         if self.compliance_ref is not None:
             if self._last_state is None:
+                print("self._last_state is None")
                 self._last_state = self.compliance_ref.get_default_state()
+            # print("####################")
             state_ref = self.compliance_ref.get_state_ref(
+                time,
                 command_matrix=command_matrix,
                 last_state=self._last_state,
-                data=self.wrench_sim.data,
+                data=self.wrench_sim.data
             )
             self._last_state = state_ref
-
-        if should_print and state_ref is not None:
-
-            # [수정된 출력부]
-            # state_ref.x_ref는 (sites, 6) 형태이므로 전체를 출력합니다.
-            print(f"Target Pose (x_ref): {np.round(state_ref.x_ref, 4)}")
-            x_obs = self.get_x_obs()
-            # x_obs도 (sites, 6) 형태이므로 그대로 출력합니다.  
-            print(f"Actual Pose (x_obs): {np.round(x_obs, 4)}")
-
-            # 오차(Error) 계산: 첫 번째 사이트(0번) 기준
-            # x_obs[0]은 첫 번째 사이트의 [x, y, z, q1, q2, q3]입니다.
-            pos_error = np.linalg.norm(state_ref.x_ref[0, :3] - x_obs[0, :3])
-            print(f"Position Error     : {pos_error:.6f} m")
-            
 
             self._last_print_time = current_time
             
         return wrenches, state_ref
 
+    def save_log(self) -> None:
+        """수집된 tau_raw / tau_bias / wrench(force) 데이터를 그래프 3개로 저장."""
+        JOINT_LABELS  = ["waist", "shoulder", "elbow",
+                         "forearm_roll", "wrist_angle", "wrist_rotate"]
+        FORCE_LABELS  = ["fx", "fy", "fz"]
+
+        for site, data in self._log.items():
+            if not data["time"]:
+                print(f"[save_log] {site}: 데이터 없음, 스킵")
+                continue
+
+            t        = np.array(data["time"])
+            t        = t - t[0]
+            tau_raw  = np.array(data["tau_raw"])   # (T, 6)
+            tau_bias = np.array(data["tau_bias"])  # (T, 6)
+            wrench   = np.array(data["wrench"])    # (T, 6)
+            motor_pos   = np.array(data["motor_pos"])    # (T, 6)
+            force    = wrench[:, :3]               # (T, 3) — force만
+
+            site_tag = site.replace("/", "_")
+
+            # ── 그래프 1: tau_raw (관절별) ────────────────────────
+            fig, axes = plt.subplots(3, 2, figsize=(14, 10))
+            fig.suptitle(f"{site} — tau_raw (관절별)", fontsize=13)
+            for j, ax in enumerate(axes.flat):
+                ax.plot(t, tau_raw[:, j], linewidth=1.2, color="tab:blue")
+                ax.axhline(0, color="gray", linewidth=0.5)
+                # ax.set_ylim(-20, 20)
+                ax.set_title(JOINT_LABELS[j])
+                ax.set_xlabel("time (s)")
+                ax.set_ylabel("torque (N·m)")
+                ax.grid(True)
+            plt.tight_layout()
+            path1 = os.path.join(self._log_save_dir,
+                                 f"{site_tag}_1_tau_raw.png")
+            fig.savefig(path1, dpi=120)
+            plt.close(fig)
+            print(f"[save_log] 저장: {path1}")
+
+            # ── 그래프 2: tau_bias (관절별) ───────────────────────
+            fig, axes = plt.subplots(3, 2, figsize=(14, 10))
+            fig.suptitle(f"{site} — tau_bias (관절별)", fontsize=13)
+            for j, ax in enumerate(axes.flat):
+                ax.plot(t, tau_bias[:, j], linewidth=1.2, color="tab:orange")
+                ax.axhline(0, color="gray", linewidth=0.5)
+                # ax.set_ylim(-20, 20)
+                ax.set_title(JOINT_LABELS[j])
+                ax.set_xlabel("time (s)")
+                ax.set_ylabel("torque (N·m)")
+                ax.grid(True)
+            plt.tight_layout()
+            path2 = os.path.join(self._log_save_dir,
+                                 f"{site_tag}_2_tau_bias.png")
+            fig.savefig(path2, dpi=120)
+            plt.close(fig)
+            print(f"[save_log] 저장: {path2}")
+
+            # ── 그래프 3: EE force (fx, fy, fz) ──────────────────
+            fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+            fig.suptitle(f"{site} — EE Force (fx, fy, fz)", fontsize=13)
+            for j, ax in enumerate(axes):
+                ax.plot(t, force[:, j], linewidth=1.2, color="tab:green")
+                ax.axhline(0, color="gray", linewidth=0.5)
+                # ax.set_ylim(-20, 20)
+                ax.set_title(FORCE_LABELS[j])
+                ax.set_xlabel("time (s)")
+                ax.set_ylabel("force (N)")
+                ax.grid(True)
+            plt.tight_layout()
+            path3 = os.path.join(self._log_save_dir,
+                                 f"{site_tag}_3_ee_force.png")
+            fig.savefig(path3, dpi=120)
+            plt.close(fig)
+            print(f"[save_log] 저장: {path3}")
+            
+            # ── 그래프 4: motor_pos (관절별) ─────────────────────
+            motor_pos_arr = np.array(data["motor_pos"])  # (T, nq)
+
+            # qpos 전체에서 site별 관절 인덱스만 추출
+            joint_qpos_idx = self._joint_qpos_indices_by_site[site]  # 6개 인덱스
+            motor_pos_joints = motor_pos_arr[:, joint_qpos_idx]       # (T, 6)
+
+            fig, axes = plt.subplots(3, 2, figsize=(14, 10))
+            fig.suptitle(f"{site} — motor_pos (관절별, rad)", fontsize=13)
+            for j, ax in enumerate(axes.flat):
+                ax.plot(t, motor_pos_joints[:, j],
+                        linewidth=1.2, color="tab:purple")
+                ax.axhline(0, color="gray", linewidth=0.5)
+                # ax.set_ylim(-20, 20)
+                ax.set_title(JOINT_LABELS[j])
+                ax.set_xlabel("time (s)")
+                ax.set_ylabel("position (rad)")
+                ax.grid(True)
+            plt.tight_layout()
+            path4 = os.path.join(self._log_save_dir,
+                                 f"{site_tag}_4_motor_pos.png")
+            fig.savefig(path4, dpi=120)
+            plt.close(fig)
+            print(f"[save_log] 저장: {path4}")
+
     def close(self) -> None:
+        try:
+            self.save_log()
+        except Exception as e:
+            print(f"[save_log 오류] {e}")
+            import traceback
+            traceback.print_exc()
         self.wrench_sim.close()

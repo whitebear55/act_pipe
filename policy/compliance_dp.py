@@ -125,6 +125,7 @@ def run_dp_inference_process(
 
         try:
             t1 = time.monotonic()
+            # 츄론 진행
             action_seq = list(
                 dp_model.get_action_from_obs(obs_window, image_deque=image_window)
             )
@@ -135,6 +136,7 @@ def run_dp_inference_process(
 
         drop_count = max(0, min(drop_count_cfg, len(action_seq)))
         action_seq = action_seq[drop_count:]
+        # 계산이 끝나면 outpur결과를 실행 큐에 put
         put_latest(
             output_queue,
             ("action", action_seq, float(obs_time), float(t2 - t1), int(drop_count)),
@@ -242,8 +244,9 @@ class ComplianceDPPolicy(CompliancePolicy):
         self.inference_input_queue = ctx.Queue(maxsize=1)
         self.inference_output_queue = ctx.Queue(maxsize=1)
         self.inference_stop_event = ctx.Event()
+        # Multiprocess로 새로운 OS process생성 -> 
         self.inference_process = ctx.Process(
-            target=run_dp_inference_process,
+            target=run_dp_inference_process, # 만들어진 프로세스가 실행할 함수 지정
             name="ComplianceDPInference",
             daemon=True,
             args=(
@@ -357,6 +360,7 @@ class ComplianceDPPolicy(CompliancePolicy):
             resized /= 255.0
         return resized.transpose(2, 0, 1)
 
+    # Camera에서 raw 이미지 가져옴
     def get_image_obs(self) -> Optional[np.ndarray]:
         if self.left_camera is None:
             return None
@@ -403,14 +407,15 @@ class ComplianceDPPolicy(CompliancePolicy):
         return True
 
     def start_video_capture_thread(self) -> None:
+        # 스레드가 중복실행되었는지 확인
         if (
             self.video_capture_thread is not None
             and self.video_capture_thread.is_alive()
         ):
             return
-        self.video_capture_stop = threading.Event()
+        self.video_capture_stop = threading.Event() 
         self.video_capture_thread = threading.Thread(
-            target=self.video_capture_worker,
+            target=self.video_capture_worker, # 주기에 맞춰서 left_camera의 이미지를 self.last_camera_frame에 저장
             name="ComplianceDPCapture",
             daemon=True,
         )
@@ -558,7 +563,7 @@ class ComplianceDPPolicy(CompliancePolicy):
         latest = None
         while True:
             try:
-                latest = self.inference_output_queue.get_nowait()
+                latest = self.inference_output_queue.get_nowait() # 최신 결과값을 로봇의 실행 큐에 input
             except queue.Empty:
                 break
 
@@ -575,14 +580,16 @@ class ComplianceDPPolicy(CompliancePolicy):
             return
 
         base_time = float(obs_time)
+        # chunk단위로 받은 action값을 시간에 따라 저장
         new_seq = [
             (base_time + idx * self.action_dt, np.asarray(action, dtype=np.float32))
             for idx, action in enumerate(action_seq)
         ]
 
+        
         if not self.model_action_seq:
             self.model_action_seq = new_seq
-        else:
+        else: # 기존에 가지고 있는 미래 계획 + 새롭게 받은 계획 Blended(temporal ensemble)
             blended_seq: List[Tuple[float, npt.NDArray[np.float32]]] = []
             prev_seq = self.model_action_seq
             prev_idx = 0
@@ -869,7 +876,7 @@ class ComplianceDPPolicy(CompliancePolicy):
             if image is None:
                 self.reset_diffusion_state()
             else:
-                obs_arr = self.get_obs(obs, x_obs)
+                obs_arr = self.get_obs(obs, x_obs) # 로봇의 현재 state
                 self.obs_deque.append(obs_arr)
                 self.image_deque.append(image)
 
@@ -878,7 +885,7 @@ class ComplianceDPPolicy(CompliancePolicy):
                     and len(self.image_deque) >= self.image_deque.maxlen
                 ):
                     now = float(time.monotonic() - self.trial_start_mono)
-                    self.consume_inference_output(now)
+                    self.consume_inference_output(now) # 로봇의 output결정
                     self.submit_inference_request(now)
 
                     if (

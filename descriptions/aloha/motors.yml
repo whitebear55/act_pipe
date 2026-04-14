@@ -1,0 +1,29 @@
+motors:
+    left_waist:
+        zero_pos: 0.059825
+    left_shoulder:
+        zero_pos: 0.001534
+    left_elbow:
+        zero_pos: -0.024544
+    left_forearm_roll:
+        zero_pos: -0.003068
+    left_wrist_angle:
+        zero_pos: 0.001534
+    left_wrist_rotate:
+        zero_pos: 0.010738
+    left_left_finger:
+        zero_pos: 0.0
+    right_waist:
+        zero_pos: -0.052155
+    right_shoulder:
+        zero_pos: -0.013806
+    right_elbow:
+        zero_pos: -0.027612
+    right_forearm_roll:
+        zero_pos: 0.001534
+    right_wrist_angle:
+        zero_pos: 0.000000
+    right_wrist_rotate:
+        zero_pos: 0.007670
+    right_left_finger:
+        zero_pos: 0.0    

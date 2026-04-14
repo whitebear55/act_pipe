@@ -120,7 +120,8 @@ class DPModel:
             return torch.load(ckpt_path, map_location=self.device, weights_only=False)
         except TypeError:
             return torch.load(ckpt_path, map_location=self.device)
-
+    
+    # CheckPoint Model Loading
     def load_model(
         self, ckpt_path: str, stats: Optional[dict] = None, ckpt: Optional[dict] = None
     ) -> None:
@@ -259,6 +260,7 @@ class DPModel:
 
         return naction
 
+    # inference 실행
     def get_action_from_obs(
         self,
         obs_deque: deque,

@@ -480,6 +480,7 @@ class Camera:
             self.refresh()
             self.frame_event.wait(timeout=1.0)
 
+        # Sync -> 읽고 쓰는 타이밍 동기화
         with self.frame_lock:
             frame = None if self.latest_frame is None else self.latest_frame.copy()
             frame_time = self.latest_frame_time

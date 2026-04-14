@@ -27,24 +27,84 @@ from vlm.affordance.compliance_predictor import CompliancePredictor
 from vlm.affordance.plan_ee_pose import plan_end_effector_poses
 from vlm.depth.depth_utils import depth_to_xyzmap
 
+# ── Task 테이블 정의 ───────────────────────────────────────────────────────────
+# 새 task 추가 시 아래 테이블만 수정하면 됩니다.
 
-TASK_OBJECT_MAP = {
+TASK_OBJECT_MAP: Dict[str, str] = {
     "wiping":  "black ink",
     "drawing": "star",
     "picking": "red box",
 }
 
-TASK_TOOL_MAP = {
+TASK_TOOL_MAP: Dict[str, str] = {
     "wiping":  "eraser",
     "drawing": "pen",
-    "picking": "gripper",   # ← eraser 대신 gripper
+    "picking": "gripper",
 }
 
-TASK_PLAN_MAP = {
+# status("wiping") → plan task명("wipe") 변환용
+TASK_PLAN_MAP: Dict[str, str] = {
     "wiping":  "wipe",
     "drawing": "draw",
     "picking": "pick",
 }
+
+# robot별 task별 기본 site 이름
+TASK_DEFAULT_SITE_MAP: Dict[str, Dict[str, List[str]]] = {
+    "leap": {
+        "wiping":  ["mf_tip"],
+        "drawing": ["rf_tip", "if_tip"],
+        "picking": ["mf_tip"],
+    },
+    "toddlerbot": {
+        "wiping":  ["left_hand_center"],
+        "drawing": ["right_hand_center"],
+        "picking": ["left_hand_center"],
+    },
+    "fr": {
+        "wiping":  ["attachment_site"],
+        "drawing": ["attachment_site"],
+        "picking": ["attachment_site"],
+    },
+}
+TASK_DEFAULT_DESCRIPTION = {
+    "wiping":  lambda obj: f"wipe up the {obj} on the whiteboard with an eraser.",
+    "drawing": lambda obj: f"draw the {obj} on the whiteboard using the pen.",
+    "picking": lambda obj: f"pick up the {obj}.",
+}
+
+# replay를 지원하는 task 집합
+# picking처럼 매번 위치가 달라지는 task는 여기에 추가하지 않습니다.
+REPLAY_SUPPORTED_TASKS: frozenset = frozenset({"wiping", "drawing"})
+
+# 모든 유효 task 집합 (TASK_OBJECT_MAP 기준으로 자동 생성)
+ACTIVE_TASKS: frozenset = frozenset(TASK_OBJECT_MAP.keys())
+
+# task 완료 시 동작 설정
+# loop=True: 완료 후 재예측 요청 (wiping의 close-loop)
+# on_complete_action: step()의 action에 적용할 값 (None이면 없음)
+TASK_COMPLETION_CONFIG: Dict[str, Dict[str, Any]] = {
+    "wiping": {
+        "loop":             True,
+        "on_complete_action": None,
+    },
+    "drawing": {
+        "loop":             False,
+        "on_complete_action": None,
+    },
+    "picking": {
+        "loop":             False,
+        "on_complete_action": {"index": -1, "value": 0.0},  # 그리퍼 닫기
+    },
+}
+
+# task 진입 시 초기화할 task 전용 상태변수
+TASK_RESET_STATE: Dict[str, Dict[str, Any]] = {
+    # picking 전용 상태 없음 (pick_arrived, pick_target_3d 제거됨)
+}
+
+# loop task에서 재예측 전 대기 시간(초)
+WIPE_PAUSE_DURATION = 2.0
 
 class ComplianceVLMPolicy(CompliancePolicy):
     """Guides compliance references via affordance-predicted trajectories."""
@@ -80,7 +140,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
             show_help=False,
         )
 
-        model = self.controller.wrench_sim.model # 로봇과 환경의 모든 정적인 물리정보(MjModel)
+        model = self.controller.wrench_sim.model 
         self.head_name = str(self.compliance_cfg.head_name).strip() # camera 위치
         self.head_site_id = -1
         self.head_body_id = -1
@@ -104,15 +164,10 @@ class ComplianceVLMPolicy(CompliancePolicy):
                 s.strip() for s in site_names_str.split(",") if s.strip()
             ]
         if not self.target_site_names:
-            if self.robot == "leap":
-                self.target_site_names = ["mf_tip"]
-            elif self.robot == "toddlerbot":
-                self.target_site_names = ["left_hand_center"]
-            # TODO : target_site_name을 수정해야함
-            elif self.robot == "fr":
-                self.target_site_names = ["attachment_site"]
+            # 기본 task="wiping"으로 초기 site 결정
+            self.target_site_names = self._default_site_names_for_mode("wiping")
 
-        # dimension check
+        # ref_motor_pos dimension check
         cfg_ref_motor_pos = np.asarray(
             self.compliance_cfg.ref_motor_pos, dtype=np.float32
         ).reshape(-1)
@@ -144,6 +199,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
         self.kp_rot_normal = float(self.compliance_cfg.kp_rot_normal) # 손목을 비틀지 마라
         self.kp_rot_tangent = float(self.compliance_cfg.kp_rot_tangent) # 표면에 수평하게 손목을 유지 
         self.fixed_contact_force = float(self.compliance_cfg.fixed_contact_force) # 물체에 접촉한 후 유지해야할 일정한 힘의 크기
+        
         self.rest_pose_command = np.asarray(
             self.base_pose_command, dtype=np.float32
         ).copy()
@@ -157,31 +213,36 @@ class ComplianceVLMPolicy(CompliancePolicy):
 
         print(f"DEBUG: Computed Rest Pose = {self.rest_pose_command}") # ref_motor_pos로 계산된 값
 
-        # "지우개로 화이트보드 닦아줘"라는 명령을 할 때!
+        # Task 상태 initialization
         self.status = "waiting"
         self.target_object_label = str(object)
 
-        self.task_object_map = {
-            "wiping":  str(object),   # CLI로 덮어쓸 수 있도록
-            "drawing": "star",
-            "picking": "red box",     # pick은 항상 red box
+        # task별 object label (CLI --object 인자로 wiping 기본값 설정)
+        self.task_object_map: Dict[str, str] = {
+            task: TASK_OBJECT_MAP[task] for task in TASK_OBJECT_MAP
         }
-        self.tool = "eraser"
+        self.task_object_map["wiping"] = str(object)  # CLI 인자 반영
+        self.tool = TASK_TOOL_MAP.get("wiping", "eraser")
+
         self.trajectory_plans: Dict[str, Tuple[np.ndarray, ...]] = {}
         self.traj_start_time: Optional[float] = None
 
-        self.wipe_pause_duration = 2.0
+        self.wipe_pause_duration  = WIPE_PAUSE_DURATION
         self.wipe_pause_end_time: Optional[float] = None
-        self.prediction_requested = False
-        self.prediction_counter = 0
-        self.replay = str(replay).strip()
+        self.prediction_requested  = False
+        self.prediction_counter    = 0
+        self.replay                = str(replay).strip()
         self.fixed_trajectory_active = False
         self.replay_task: Optional[str] = None
-        self.replay_contact_points_camera: Dict[str, np.ndarray] = {}
+        self.replay_contact_points_camera:  Dict[str, np.ndarray] = {}
         self.replay_contact_normals_camera: Dict[str, np.ndarray] = {}
         self.replay_unavailable_reported = False
-        self.predictor: Optional[AffordancePredictor] = None
+
+        # 작업 완료 Flag
+        self._pending_complete_action: Optional[Dict[str, Any]] = None
+
         # Replay 시스템
+        self.predictor: Optional[AffordancePredictor] = None
         self._load_replay_trajectory()
         self._activate_replay_task_if_available()
 
@@ -189,6 +250,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
         self.predictor = AffordancePredictor(
             model=str(predictor_model),
             provider=str(predictor_provider),
+            server_ip="127.0.0.1"
         )
 
 
@@ -233,9 +295,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
             pos_stiffness=[400.0, 400.0, 400.0], rot_stiffness=[40.0, 40.0, 40.0]
         )
 
-        # ── Pick 작업 초기화 ─────────────────────────────────
-        self.pick_arrived = False                          # EE 도착 여부
-        self._PICK_ARRIVE_THRESH = 0.02                   # 도착 판정 거리 (m)
+        
     
     def reset(self) -> None:
         self.traj_start_time = None
@@ -290,10 +350,13 @@ class ComplianceVLMPolicy(CompliancePolicy):
     def _replay_site_names(self) -> List[str]:
         return [str(x) for x in self.replay_contact_points_camera.keys()]
 
-    def _default_site_names_for_mode(self, is_wiping: bool) -> List[str]:
-        if self.robot == "leap":
-            return ["mf_tip"] if is_wiping else ["rf_tip", "if_tip"]
-        return ["left_hand_center"] if is_wiping else ["right_hand_center"]
+    def _default_site_names_for_mode(self, task: str) -> List[str]:
+        """task 문자열 기반으로 기본 site names 반환."""
+        robot_map = TASK_DEFAULT_SITE_MAP.get(self.robot, {})
+        if robot_map:
+            return robot_map.get(task, ["attachment_site"])
+        # 정의되지 않은 robot은 첫 번째 wrench site 사용
+        return [self.wrench_site_names[0]] if self.wrench_site_names else []
 
     # 과거의 성공 기억 불러오기
     def _load_replay_trajectory(self) -> None:
@@ -344,7 +407,8 @@ class ComplianceVLMPolicy(CompliancePolicy):
 
     # 리플레이 가능 여부 판별
     def can_use_replay_for_current_mode(self) -> bool:
-        if self.status not in ("wiping", "drawing"):
+        REPLAY_SUPPORTED_TASKS = frozenset({"wiping", "drawing"})
+        if self.status not in REPLAY_SUPPORTED_TASKS:
             return False
         if self.replay_task is None:
             return False
@@ -361,36 +425,52 @@ class ComplianceVLMPolicy(CompliancePolicy):
 
     def set_mode(
         self,
-        is_wiping: bool,
+        task :str,
         object_label: Optional[str] = None,
         site_names: Optional[List[str]] = None,
     ) -> None:
-        target_status = "wiping" if is_wiping else "drawing"
-        if self.status == target_status and self.status != "waiting":
+        
+        if task not in ACTIVE_TASKS:
+            print(f"[ComplianceVLM] 알 수 없는 task: {task}")
             return
-        self.status = target_status
-        self.tool = "eraser" if is_wiping else "pen"
-        task_key = "wiping" if is_wiping else "drawing"
-        resolved_label = object_label if object_label is not None else self.task_object_map.get(task_key)
+
+        # 이미 같은 task 진행 중이면 무시
+        if self.status == task and self.status != "waiting":
+            return
+
+        # ── status / tool 설정 ──────────────────────────────
+        self.status = task
+        self.tool   = TASK_TOOL_MAP.get(task, "gripper")
+
+        # ── object label 설정 ───────────────────────────────
+        resolved_label = (
+            object_label
+            if object_label is not None
+            else self.task_object_map.get(task)
+        )
         if resolved_label is not None:
             self.target_object_label = str(resolved_label)
-        
+
+        # ── site names 설정 ─────────────────────────────────
         if site_names is not None and len(site_names) > 0:
             self.target_site_names = [str(x) for x in site_names]
         elif not self.site_names_fixed:
-            self.target_site_names = self._default_site_names_for_mode(is_wiping)
-        if self.predictor is not None:
-            if is_wiping:
-                self.predictor.default_task = f"wipe up the {self.target_object_label} on the whiteboard with an eraser."
-            else:
-                self.predictor.default_task = f"draw the {self.target_object_label} on the whiteboard using the pen."
-        self.trajectory_plans = {}
-        self.traj_start_time = None
-        self.wrench_command[:, :] = 0.0
-        self.prediction_requested = not self.can_use_replay_for_current_mode()
-        self.fixed_trajectory_active = False
+            self.target_site_names = self._default_site_names_for_mode(task)
 
-    # 저장된 파일 찾기
+        # ── predictor default_task 설정 ─────────────────────
+        if self.predictor is not None:
+            desc_fn = TASK_DEFAULT_DESCRIPTION.get(task)
+            if desc_fn is not None:
+                self.predictor.default_task = desc_fn(self.target_object_label)
+
+        # ── 궤적 초기화 ─────────────────────────────────────
+        self.trajectory_plans        = {}
+        self.traj_start_time         = None
+        self.wrench_command[:, :]    = 0.0
+        self.fixed_trajectory_active = False
+        self.prediction_requested    = not self.can_use_replay_for_current_mode()
+
+        # 저장된 파일 찾기
     def get_fixed_trajectory_path(self) -> Optional[Path]:
         if self.replay:
             replay_path = Path(self.replay).expanduser()
@@ -489,18 +569,10 @@ class ComplianceVLMPolicy(CompliancePolicy):
         if cmd is None:
             return
 
-        if cmd == "wiping":
-            self.set_mode(True)
-        elif cmd == "drawing":
-            self.set_mode(False)
-        elif cmd == "picking":
-            if self.status != "picking":
-                self.status = "picking"
-                self.pick_target_3d = None
-                self.pick_future = None
-                self.pick_arrived = False
-                self.trajectory_plans = {}
-                print("[Pick] pick 모드 진입")
+        if cmd in ACTIVE_TASKS:
+            if self.status != cmd:
+                self.set_mode(cmd)
+                print(f"[ComplianceVLM] {cmd} 모드 진입")
 
     #이미지 규격 통일(VLM이 이해할 수 있는 규격으로) 
     def _to_hwc_u8(self, image: np.ndarray) -> np.ndarray:
@@ -596,6 +668,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
             return None
         
         is_wiping = task == "wiping"
+        print(f"is_wiping : {is_wiping}")
         # VLM이 카메라image와 명령어를 VLM에게 전달 -> 목표 라벨에 대한 2D/3D 어포던스(점과 방향)을 예측
         # 3D 좌표값을 찍기위해서는 "stereo matching"방법이 필요 -> 하나의 스테레오 카메라내부의 2개의 렌즈에서 오는 Image를 뜻함
         prediction = self.predictor.predict(
@@ -603,7 +676,7 @@ class ComplianceVLMPolicy(CompliancePolicy):
             right_image=right_image,
             robot_name=self.robot,
             site_names=site_names,
-            is_wiping=is_wiping,
+            task=is_wiping,
             output_dir=output_dir,
             object_label=object_label,
         )
@@ -671,16 +744,13 @@ class ComplianceVLMPolicy(CompliancePolicy):
             return
         if self.predictor is None:
             return
-        # TODO : real_world task
-        if self.status in ("wiping","drawing"):
-            if not self.prediction_requested and self.trajectory_plans:
-                return
-            if has_fixed_trajectory and not self.trajectory_plans:
-                return
-        # picking: 이미 궤적이 있으면 건너뜀
-        elif self.status == "picking":
-            if self.trajectory_plans:
-                return
+        if self.status not in ACTIVE_TASKS:   # ← 정의되지 않은 task 방어
+            return
+        # 모든 task 공통 진입 조건
+        if not self.prediction_requested and self.trajectory_plans:
+            return
+        if has_fixed_trajectory and not self.trajectory_plans:
+            return
 
         left_image, right_image = self._get_stereo_images(obs) # Img Get
         head_pos, head_quat = self.get_head_pose() # 눈의 위치 GET
@@ -808,17 +878,25 @@ class ComplianceVLMPolicy(CompliancePolicy):
         self.base_pose_command = np.asarray(self.pose_command, dtype=np.float32).copy()
 
         if indices and all(idx >= length - 1 for idx, length in indices.values()):
-            if self.status == "wiping":
-                if self.fixed_trajectory_active: # 리플레이 모드
-                    self.status = "waiting"
+            cfg = TASK_COMPLETION_CONFIG.get(self.status, {})
+
+            if cfg.get("loop") and not self.fixed_trajectory_active:
+                # wiping VLM 실시간 모드: 일시 정지 후 재예측
+                self.wipe_pause_end_time = float(now) + self.wipe_pause_duration
+            
+            else:
+                # 그 외 모든 task: waiting으로 복귀
+                self.status = "waiting"
+                if self.fixed_trajectory_active:
                     self.wipe_pause_end_time = None
                     self.fixed_trajectory_active = False
-                else: # VLM 실시간 예측 모드 (close-loop 제어를 위해) / Jitter 방지
-                    self.wipe_pause_end_time = float(now) + self.wipe_pause_duration
-            else:
-                self.status = "waiting"
+
+            # task별 완료 액션 플래그 설정
+            if cfg.get("on_complete_action") is not None:
+                self._pending_complete_action = cfg["on_complete_action"]
+
             self.trajectory_plans = {}
-            self.traj_start_time = None
+            self.traj_start_time  = None
 
     def start_video_logging(self) -> None:
         if self.video_logging_active or not self.record_video:
@@ -957,20 +1035,16 @@ class ComplianceVLMPolicy(CompliancePolicy):
         self._consume_prediction(float(obs.time),sim) # VLM이 답변을 다 했는지 확인 및 답변이 왔다면 새 경로로 경로 계확
         self._apply_trajectory(float(obs.time)) 
 
-        # pick 도착 판정만 여기서 처리
-        if self.status == "picking" and self.pick_target_3d is not None and not self.pick_arrived:
-            x_obs = self.controller.get_x_obs()
-            pos_err = float(np.linalg.norm(x_obs[0, :3] - self.pick_target_3d))
-            if pos_err < self._PICK_ARRIVE_THRESH:
-                print(f"[Pick] 도착! err={pos_err:.4f}m → 그리퍼 닫기")
-                action[-1] = np.float32(0.0)
-                self.pick_arrived = True
-                self.status = "waiting"
-
         left, right = self._get_stereo_images(obs)
         if self.record_video:
             self.start_video_logging()
             self.log_camera_frame(float(obs.time), left, right)
+
+        if getattr(self, "_pending_complete_action", None) is not None:
+            act = self._pending_complete_action
+            action[act["index"]] = np.float32(act["value"])
+            self._pending_complete_action = None
+            
         return np.asarray(action, dtype=np.float32)
 
     def close(self, exp_folder_path: str = "") -> None:

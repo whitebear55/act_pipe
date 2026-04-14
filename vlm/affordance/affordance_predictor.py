@@ -32,7 +32,7 @@ from .plan_ee_pose import (
 
 # from toddlerbot.utils.misc_utils import profile
 
-DEFAULT_SERVER_IP = "192.168.0.144"
+DEFAULT_SERVER_IP = "192.168.0.45"
 DEFAULT_FS_PORTS: Tuple[int, int] = (5555, 5556)
 DEFAULT_GSAM_PORTS: Tuple[int, int] = (5560, 5561)
 DEFAULT_FS_TIMEOUT = 5.0
@@ -1239,7 +1239,7 @@ class AffordancePredictor:
         right_image: np.ndarray,
         robot_name: str,
         site_names: List[str],
-        is_wiping: bool = True,
+        task: str = "wiping",       # [수정] is_wiping: bool → task: str
         output_dir: Optional[str] = None,
         object_label: Optional[str] = None,
     ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
@@ -1261,6 +1261,9 @@ class AffordancePredictor:
 
         # Reset status before running a new prediction.
         self.last_wiping_done = False
+
+        # [수정] task 문자열로부터 wiping 여부 파생 (하위 호환 유지)
+        is_wiping = task == "wiping"
         debug = output_dir is not None
         if debug:
             os.makedirs(output_dir, exist_ok=True)
@@ -1293,10 +1296,16 @@ class AffordancePredictor:
         )
         
         # SAM3를 위한 Target 설정
+        # [수정] is_wiping bool → task 문자열 기반
+        # wiping: 물체 + 배경(whiteboard/vase) 모두 탐색
+        # drawing/picking: 배경(whiteboard/vase) 또는 물체 자체를 탐색
         if is_wiping:
-            segmentation_target = object_label_str + ".whiteboard.vase" # 검은 잉크 + 화이트보드/꽃병(물체와 배경지식을 같이 제공)
+            segmentation_target = object_label_str + ".whiteboard.vase"
+        elif task == "picking":
+            # picking: 집을 물체를 직접 탐색
+            segmentation_target = object_label_str
         else:
-            segmentation_target = "whiteboard.vase" # 그릴 때는 칠판이나 꽃병 영역을 찾아줘(타겟이 없으므로)
+            segmentation_target = "whiteboard.vase"
 
         segments = [segment.strip() for segment in object_label_str.split(".")]
         target_priority = [segment for segment in segments if segment]
@@ -1376,7 +1385,7 @@ class AffordancePredictor:
             depth_result = None
             compliance_image = rectified_left # 후보점들을 기반으로 Gemini는 "1번에서 5번순서대로 닦아!" 명령을 지시
 
-        else: # Drawing
+        else: # drawing / picking: FoundationStereo depth 사용
             depth_result = self.request_foundation_stereo( # Depth 추정 
                 rectified_left,
                 rectified_right,

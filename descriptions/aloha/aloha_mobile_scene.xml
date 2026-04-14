@@ -1,0 +1,61 @@
+<mujoco model="aloha_mobile_scene">
+
+  <!--
+    aloha_mobile.xml을 최상위에서 include:
+      - compiler, option, asset, default
+      - worldbody (robot arms + lights + cameras)
+      - contact, equality, keyframe
+      - joint_position_actuators.xml
+    위 모든 요소가 이 씬에 병합됩니다.
+  -->
+  <include file="aloha_mobile.xml"/>
+
+  <!-- 씬 전용 추가 asset -->
+  <asset>
+    <texture name="floor_tex"
+             type="2d" builtin="checker"
+             rgb1="0.38 0.38 0.38" rgb2="0.55 0.55 0.55"
+             width="512" height="512"/>
+    <material name="floor_mat"
+              texture="floor_tex"
+              texrepeat="5 5"
+              reflectance="0.08"/>
+    <material name="table_mat"  rgba="0.62 0.48 0.33 1" reflectance="0.05"/>
+    <material name="mount_mat"  rgba="0.18 0.18 0.18 1"/>
+  </asset>
+
+  <!-- 씬 worldbody: 환경 요소 추가 (로봇 팔은 aloha_mobile.xml에 있음) -->
+  <worldbody>
+
+    <!-- ── 씬 조명 ── -->
+    <!-- 주 방향광 (태양광, 그림자 생성) -->
+    <light name="sun"
+           directional="true"
+           pos="1 -1 4"
+           dir="-0.2 0.3 -1"
+           diffuse="0.75 0.75 0.75"
+           specular="0.15 0.15 0.15"
+           castshadow="true"/>
+    <!-- fill light (그림자 부드럽게) -->
+    <light name="fill"
+           directional="true"
+           pos="-1 -2 3"
+           dir="0.2 0.5 -1"
+           diffuse="0.25 0.25 0.25"
+           specular="0.0 0.0 0.0"
+           castshadow="false"/>
+
+    <!-- ── 바닥 ── -->
+    <geom name="floor"
+          type="plane"
+          size="4 4 0.1"
+          pos="0 0 0"
+          material="floor_mat"
+          condim="3"
+          friction="1 0.005 0.0001"/>
+
+ 
+
+  </worldbody>
+
+</mujoco>

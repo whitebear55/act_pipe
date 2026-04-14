@@ -60,7 +60,7 @@ def _build_sim(
         # fr3는 MuJoCo 내장 position actuator(kp/kv)를 사용하므로
         # arx/g1과 동일하게 custom_pd=False로 설정
         # TODO(custom_pd) : 모터의 토크를 누가 담당하느냐 -> 전류를 V_pwm, V_emf,R_w로 구하느냐 OR mujoco 내장 엔진을 사용하느냐
-        if args.robot in {"arx", "g1", "fr3" , "fr"}:
+        if args.robot in {"arx", "g1", "fr3" , "fr", "aloha"}:
             custom_pd = False
         else:
             custom_pd = True
@@ -246,6 +246,7 @@ def run_policy(sim: Any, robot: str, policy: Any) -> None:
             obs.time -= start_time
             action = policy.step(obs, sim)
             action_arr = np.asarray(action, dtype=np.float32)
+            # print(f"action_arr의 개수 : {len(action_arr)}")
 
             recorder.append(obs=obs, action=action_arr)
 
@@ -256,7 +257,11 @@ def run_policy(sim: Any, robot: str, policy: Any) -> None:
 
             if bool(getattr(policy, "done", False)):
                 break
+            # action_arr_14 = np.delete(action_arr, [7, 15])
 
+            # 14차원으로 변환된 배열을 모터 타겟으로 전송
+            # sim.set_motor_target(action_arr_14)
+            
             sim.set_motor_target(action_arr)
             sim.step()
             if not sim.sync():
@@ -287,7 +292,7 @@ def _parse_args(args: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Unified policy runner")
     # fr3 추가 
     parser.add_argument(
-        "--robot", type=str, required=True, choices=["toddlerbot", "leap", "arx", "g1", "fr3", "fr"]
+        "--robot", type=str, required=True, choices=["toddlerbot", "leap", "arx", "g1", "fr3", "fr", "aloha"]
     )
     parser.add_argument("--sim", type=str, default="mujoco", choices=["mujoco", "real"])
     parser.add_argument(
@@ -360,7 +365,7 @@ def _validate_arg_combination(parsed: argparse.Namespace) -> None:
     sim = str(parsed.sim).strip().lower()
 
     # real_only_policies = {"compliance_vlm", "compliance_dp"}
-    real_only_policies = {"compliance_dp"}
+    real_only_policies : set[str] = set()
     if policy in real_only_policies and sim != "real":
         allowed = ", ".join(sorted(real_only_policies))
         raise ValueError(
@@ -395,6 +400,10 @@ def main(args: Sequence[str] | None = None) -> None:
             gin_file = f"{parsed.robot}.gin"
     elif str(parsed.policy) == "compliance_dp" and str(parsed.robot) == "toddlerbot":
         gin_file = "toddlerbot_dp.gin"
+
+    elif str(parsed.policy) == "compliance_dp" and str(parsed.robot) in {"fr", "fr3"}:
+        gin_file = "fr_dp.gin"
+
     else:
         gin_file = f"{parsed.robot}.gin"
     gin_path = os.path.join(_repo_root(), "config", gin_file)
@@ -421,7 +430,7 @@ def main(args: Sequence[str] | None = None) -> None:
     xml_path_raw = str(controller_cfg.xml_path)
     xml_path = _resolve_repo_path(xml_path_raw)
 
-    use_camera = (str(parsed.policy) == "compliance_vlm") # VLM을 사용하면 시뮬레이션에서 카메라를 사용
+    use_camera = str(parsed.policy) in {"compliance_vlm","compliance_dp"} # VLM을 사용하면 시뮬레이션에서 카메라를 사용
     # use_camera = False
     # TODO : 실제 로봇 hardware와 통신할 sim객체를 생성
     sim = _build_sim(
@@ -461,6 +470,9 @@ def main(args: Sequence[str] | None = None) -> None:
     elif policy_name == "compliance_dp":
         from policy.compliance_dp import ComplianceDPPolicy
 
+        if not str(parsed.ckpt).strip():
+            raise ValueError("--ckpt 경로가 필요합니다. 예: --ckpt /path/to/checkpoint.ckpt")
+        
         policy = ComplianceDPPolicy(
             **policy_kwargs,
             ckpt=str(parsed.ckpt),
